@@ -713,6 +713,9 @@ export class Session {
 
   endRound() {
     if (this.metrics.fills > 0) this.closeAllPositions();
+    for (const r of this.rfqs) {
+      if (r.status === 'open' || r.status === 'quoted') r.status = 'expired';
+    }
     this.phase = 'break';
     const startPnl = this.roundSnapshotStart?.pnl ?? 0;
     const pnl = this.totalPnl() - startPnl;

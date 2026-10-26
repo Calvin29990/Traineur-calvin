@@ -490,7 +490,7 @@ label.field { display: block; }
   border-radius: 2px;
   font-family: var(--mono);
   font-size: 9.5px;
-  padding: 3px 2px;
+  padding: 2px 2px;
   transition: all 0.12s;
 }
 .chip-btn:hover { color: #d6f0ff; border-color: #2c6885; background: #0e3247; }
@@ -499,10 +499,10 @@ label.field { display: block; }
 /* -------------------------------------------------------------------- RFQ */
 .rfq-body { display: flex; flex-direction: column; min-height: 0; overflow-y: auto; }
 .rfq-live {
-  padding: 9px;
+  padding: 8px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 .rfq-top { display: flex; align-items: flex-start; gap: 8px; }
 .rfq-client {
@@ -533,10 +533,10 @@ label.field { display: block; }
   border: 1px solid #1d4459;
   border-radius: 4px;
   background: rgba(4, 18, 28, 0.45);
-  padding: 8px;
+  padding: 7px;
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 6px;
 }
 .quote-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
 .bid-input input { border-color: rgba(35, 212, 124, 0.45); color: #b8ffdb; }
@@ -834,6 +834,22 @@ label.field { display: block; }
 }
 .toast.err { border-left-color: var(--red); }
 .toast.ok { border-left-color: var(--green); }
+
+.round-cta {
+  position: fixed;
+  bottom: 34px; left: 50%;
+  transform: translateX(-50%);
+  z-index: 45;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  background: rgba(10, 34, 48, 0.97);
+  border: 1px solid #2a6383;
+  border-radius: 6px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.65);
+}
+.round-cta .kicker { font-size: 8.5px; letter-spacing: 1.6px; margin: 0; }
 
 /* ------------------------------------------------------------ status bar */
 .statusbar {

@@ -26,6 +26,7 @@ export default function App() {
     const onKey = (e) => {
       const tag = (e.target?.tagName || '').toLowerCase();
       if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
+      if (tag === 'button' && e.code === 'Space') return;
       if (e.key === 'Escape') { setDrawer(null); return; }
       if (!state) return;
       if (e.code === 'Space') {
@@ -118,6 +119,21 @@ export default function App() {
           onRestart={() => { setFinalDismissed(false); send({ type: 'restart' }); }}
           onLeaderboard={() => { setFinalDismissed(true); setDrawer('leaderboard'); }}
         />
+      )}
+
+      {phase === 'break' && !showDebrief && (
+        <div className="round-cta">
+          <div>
+            <div className="kicker" style={{ marginBottom: 2 }}>Round {state.round} terminé</div>
+            <div className="mono" style={{ fontSize: 11, color: 'var(--muted)' }}>
+              Cumul {usdSign(state.pnl.total)} · top {Math.max(1, Math.round(100 - state.leaderboard.topPct))} %
+            </div>
+          </div>
+          <button className="btn ghost" onClick={() => setDebriefDismissed(false)}>Revoir le débrief</button>
+          <button className="btn primary" onClick={() => send({ type: 'nextRound' })}>
+            {state.round >= state.roundsTotal ? 'Résultat final' : `▶ Round ${state.round + 1}`}
+          </button>
+        </div>
       )}
 
       {phase === 'done' && finalDismissed && (
