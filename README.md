@@ -10,6 +10,29 @@ avec un moteur et des contenus **originaux**. Aucune affiliation avec un organis
 
 ---
 
+## Déploiement en un clic
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Calvin29990/Traineur-calvin)
+
+| plateforme | marche à suivre | config incluse |
+|---|---|---|
+| **Render** | bouton ci-dessus, ou *New → Web Service* → ce dépôt | `render.yaml` |
+| **Railway** | *New Project → Deploy from GitHub repo* → ce dépôt | `railway.json` |
+| **Fly.io / VPS / Docker** | `docker build -t tradelab . && docker run -p 8788:8788 tradelab` | `Dockerfile` |
+| **Heroku-like** | détecte automatiquement le `Procfile` | `Procfile` |
+
+Le serveur lit le port dans la variable d'environnement `PORT` (8788 par défaut) et écoute sur `0.0.0.0`.
+Commande de build : `npm ci && npm run build` — commande de démarrage : `node server/index.js`.
+
+> **À savoir**
+> - Le jeu a besoin d'un **serveur Node persistant** (WebSocket + moteur de marché en mémoire) :
+>   un hébergement purement statique (GitHub Pages, export statique Netlify/Vercel) ne suffit pas.
+> - Une seule instance : les sessions vivent en mémoire, pas de mise à l'échelle horizontale.
+> - Sur une offre gratuite, l'instance s'endort après inactivité : la session de jeu en cours est perdue,
+>   l'application redémarre proprement au chargement suivant.
+
+---
+
 ## Démarrage
 
 ```bash

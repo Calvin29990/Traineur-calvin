@@ -9,6 +9,8 @@
     "build": "vite build",
     "start": "node server/index.js",
     "serve": "npm run build && node server/index.js",
+    "docker:build": "docker build -t tradelab .",
+    "docker:run": "docker run --rm -p 8788:8788 tradelab",
     "balance": "node scripts/balance.js"
   },
   "dependencies": {
