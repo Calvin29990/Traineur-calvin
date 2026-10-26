@@ -116,6 +116,9 @@ button { cursor: pointer; }
   flex: 0 0 auto;
 }
 
+.panel-head > * { flex-shrink: 0; }
+.panel-head .panel-title { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .panel-title {
   font-size: 10px;
   font-weight: 700;
@@ -854,6 +857,7 @@ label.field { display: block; }
 /* ------------------------------------------------------------ status bar */
 .statusbar {
   display: flex; align-items: center; gap: 14px;
+  overflow: hidden; white-space: nowrap;
   padding: 0 10px;
   background: #051420;
   border-top: 1px solid var(--line);

@@ -15,7 +15,13 @@ app.use(express.json());
 
 const dist = path.join(ROOT, 'dist');
 if (fs.existsSync(dist)) {
-  app.use(express.static(dist, { maxAge: '1h', index: 'index.html' }));
+  app.use(express.static(dist, {
+    index: 'index.html',
+    maxAge: '1h',
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('index.html')) res.setHeader('Cache-Control', 'no-cache');
+    },
+  }));
 }
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, sessions: sessions.size, balance: BALANCE }));
