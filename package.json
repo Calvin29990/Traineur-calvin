@@ -1,0 +1,26 @@
+{
+  "name": "tradelab-market-maker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Simulateur d'entraînement au market making / trading equities — inspiré des challenges de simulation (format non officiel).",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "start": "node server/index.js",
+    "serve": "npm run build && node server/index.js",
+    "docker:build": "docker build -t tradelab .",
+    "docker:run": "docker run --rm -p 8788:8788 tradelab",
+    "balance": "node scripts/balance.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^5.4.10"
+  }
+}
