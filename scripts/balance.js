@@ -1,54 +1,115 @@
-// Script de calibrage : fait jouer plusieurs stratégies au moteur et compare
-// les P&L. Permet de vérifier que le jeu est "gagnable" et où se situe le top 10 %.
+// Calibration benchmark for CFA Institute × AmplifyME Dual-Role Engine
+// Verifies Round 1 (IB 1) + Round 2 (AM 1 $20M) strategies against the 260-student cohort.
 import { Session, BALANCE } from '../server/engine.js';
 
-const ROUNDS = 3;
-
-function playSession(strategy, seed) {
-  const s = new Session({ id: 'x', seed, nickname: 'BOT' });
+function playChallenge(strategy, seed) {
+  const s = new Session({ id: 'cal', seed, nickname: 'CANDIDATE', mode: 'challenge', rounds: 2, roundSeconds: 300 });
   s.beginRound();
 
-  let lastQuoteFor = null;
-  let history = {};
-  const fillDiscount = 0.72; // un humain ne quote pas 100 % des demandes
+  let quotedIds = new Set();
+  let lastNewsSeen = null;
+  let lastOutreach = 0;
 
-  for (let step = 0; step < Math.ceil((ROUNDS * BALANCE.roundSeconds) / 0.25) + 2000; step++) {
+  for (let step = 0; step < 3000; step++) {
     s.step(0.25);
-    if (s.phase === 'break') { s.beginRound(); lastQuoteFor = null; continue; }
+    if (s.phase === 'break') {
+      s.beginRound();
+      quotedIds = new Set();
+      lastNewsSeen = null;
+      lastOutreach = 0;
+      continue;
+    }
     if (s.phase === 'done') break;
 
-    const rfq = s.activeRfq();
-    if (rfq && rfq.id !== lastQuoteFor) {
-      lastQuoteFor = rfq.id;
-      const i = s.inst[rfq.ticker];
-      const mid = i.mid;
-      const tr = history[rfq.ticker] || (history[rfq.ticker] = []);
-      tr.push(mid);
-      if (tr.length > 40) tr.shift();
-      const mom = tr.length > 12 ? (mid / tr[tr.length - 12] - 1) : 0;
-
-      let half = strategy.half;
-      let skew = 0;
-      if (strategy.skewNews) skew = Math.max(-0.006, Math.min(0.006, mom * strategy.skewFactor));
-      if (strategy.wideAfterNews) {
-        const recent = s.news.find((n) => n.time && Math.abs(s.totalSim - (n.at ?? 0)) < 0);
-        if (recent) half *= 1.6;
+    const topNews = s.news.find((n) => n.kind !== 'NOTE');
+    const isFreshNews = topNews && topNews.id !== lastNewsSeen;
+    if (isFreshNews) {
+      lastNewsSeen = topNews.id;
+      if (s.role === 'IB' && strategy.pullOnNews) {
+        // Pull stale live quotes immediately when breaking news hits!
+        for (const lq of [...s.liveQuotes]) s.cancelQuote(lq.id);
       }
-      if (strategy.noQuoteInformed && Math.abs(mom) > 0.004) {
-        s.passRfq(rfq.id);
-        continue;
+      if (s.role === 'AM' && strategy.amNewsAlpha) {
+        // React to news as $20M Asset Manager
+        if (topNews.kind === 'STOCK') {
+          const tk = topNews.ticker;
+          const dir = topNews.impact > 0 ? 'BUY' : 'SELL';
+          const eq = s.inst[tk];
+          const qty = Math.max(2000, Math.round((3500000 / eq.mid) / 1000) * 1000);
+          if (strategy.amUseIbQuotes) {
+            s.requestQuote({ dealerRoom: 'ib1test1', ticker: tk, qty });
+            s._wantSide = { tk, dir };
+          } else {
+            s.tradeExchange(tk, dir, qty);
+          }
+        } else if (topNews.kind === 'MACRO') {
+          const dir = topNews.impact > 0 ? 'BUY' : 'SELL';
+          for (const tk of ['MSFT', 'BP', 'VW']) {
+            const eq = s.inst[tk];
+            const qty = Math.max(1000, Math.round((2400000 / eq.mid) / 1000) * 1000);
+            if (strategy.amUseIbQuotes) {
+              s.requestQuote({ dealerRoom: 'ib2test1', ticker: tk, qty });
+              s._wantSide = { tk, dir };
+            } else {
+              s.tradeExchange(tk, dir, qty);
+            }
+          }
+        }
       }
-      if (Math.random() > fillDiscount) { s.passRfq(rfq.id); continue; }
-
-      const bid = mid * (1 - half + skew);
-      const offer = mid * (1 + half + skew);
-      s.quoteRfq(rfq.id, Math.round(bid * 100) / 100, Math.round(offer * 100) / 100, rfq.qty, rfq.qty, 45);
     }
 
-    if (strategy.hedgeAt && step % 4 === 0) {
-      for (const t of Object.keys(s.positions)) {
-        const p = s.positions[t];
-        if (Math.abs(p.qty * s.inst[t].mid) > strategy.hedgeAt) s.hedge(t);
+    if (s.role === 'IB') {
+      // Proactive client outreach in chat
+      if (strategy.proactiveChat && s.totalSim - lastOutreach > 24) {
+        lastOutreach = s.totalSim;
+        const cl = s.clients[Math.floor(step) % s.clients.length];
+        s.chat(cl.roomId, 'hi there - seen the news? can I help you trade BP?');
+      }
+
+      // Answer open client RFQs
+      for (const req of s.clientRequests) {
+        if (req.status !== 'open' || quotedIds.has(req.id)) continue;
+        quotedIds.add(req.id);
+        const eq = s.inst[req.ticker];
+        let skew = 0;
+        if (strategy.skewNews && topNews && (s.totalSim - topNews.simAt) < 35) {
+          if (topNews.kind === 'STOCK' && topNews.ticker === req.ticker) skew = Math.sign(topNews.impact) * 0.008;
+          else if (topNews.kind === 'MACRO') skew = Math.sign(topNews.impact) * 0.005;
+        }
+        const half = strategy.ibHalfSpread;
+        const bid = Number((eq.mid * (1 - half + skew)).toFixed(2));
+        const offer = Number((eq.mid * (1 + half + skew)).toFixed(2));
+        s.sendQuote({
+          clientRoom: req.clientRoom,
+          ticker: req.ticker,
+          bid,
+          offer,
+          bidVol: req.qty,
+          offerVol: req.qty,
+          validFor: 45,
+          rfqId: req.id,
+        });
+      }
+
+      // Unwind IB inventory
+      if (strategy.unwind && step % 6 === 0) {
+        for (const t of Object.keys(s.positions)) {
+          const p = s.positions[t];
+          const eq = s.inst[t];
+          if (Math.abs(p.qty * eq.mid) > strategy.unwindThreshold) {
+            const clip = strategy.smartClips
+              ? Math.min(Math.abs(p.qty), Math.round(eq.baseDepth * 0.35))
+              : Math.abs(p.qty);
+            s.tradeExchange(t, p.qty > 0 ? 'SELL' : 'BUY', clip);
+          }
+        }
+      }
+    } else if (s.role === 'AM') {
+      // Accept incoming IB dealer quotes if we requested them
+      if (strategy.amUseIbQuotes && s.liveQuotes.length > 0 && s._wantSide) {
+        const q = s.liveQuotes[0];
+        const dir = topNews && topNews.impact < 0 ? 'SELL' : 'BUY';
+        s.acceptDealerQuote({ quoteId: q.id, side: dir, qty: q.bidVol });
       }
     }
   }
@@ -56,45 +117,42 @@ function playSession(strategy, seed) {
 }
 
 const strategies = {
-  'naïf 8bps': { half: 0.0008 },
-  'symétrique 12bps': { half: 0.0012 },
-  'symétrique 20bps': { half: 0.0020 },
-  'large 35bps': { half: 0.0035 },
-  'skew momentum x2': { half: 0.0011, skewNews: true, skewFactor: 2 },
-  'skew momentum x3 + hedge 8M': { half: 0.0011, skewNews: true, skewFactor: 3, hedgeAt: 8000000 },
-  'skew + hedge + pass toxique': { half: 0.0010, skewNews: true, skewFactor: 2.5, hedgeAt: 10000000, noQuoteInformed: true },
-  'couvre tout 12bps': { half: 0.0012, hedgeAt: 1 },
-  'couvre tout 25bps': { half: 0.0025, hedgeAt: 1 },
+  'Débutant passif (sans pull/skew)': {
+    ibHalfSpread: 0.009, pullOnNews: false, skewNews: false, unwind: false, amNewsAlpha: false,
+  },
+  'Intermédiaire (dump Exchange)': {
+    ibHalfSpread: 0.015, pullOnNews: true, skewNews: false, unwind: true, unwindThreshold: 1200000, smartClips: false,
+    amNewsAlpha: true, amUseIbQuotes: false,
+  },
+  'Candidat Top 10% (Playbook CFA)': {
+    ibHalfSpread: 0.014, pullOnNews: true, skewNews: true, proactiveChat: true,
+    unwind: true, unwindThreshold: 500000, smartClips: true,
+    amNewsAlpha: true, amUseIbQuotes: true,
+  },
 };
 
-const N = 24;
-console.log(`Rounds: ${ROUNDS}x${BALANCE.roundSeconds}s — ${N} sessions par stratégie\n`);
-console.log('Stratégie'.padEnd(30), 'moy.'.padStart(11), 'méd.'.padStart(11), 'p90'.padStart(11), 'p10'.padStart(11), 'spread'.padStart(10), 'adv.'.padStart(9), 'fills'.padStart(7), 'rfqs'.padStart(6));
+const N = 16;
+console.log(`CFA × AmplifyME Calibration (2 Rounds: IB 1 + AM 1 $20M, ${BALANCE.roundSeconds}s/round, N=${N})\n`);
 for (const [name, st] of Object.entries(strategies)) {
-  const res = [];
+  const runs = [];
   for (let k = 0; k < N; k++) {
-    const s = playSession(st, 1000 + k * 37);
-    res.push({ pnl: s.totalPnl(), cap: s.metrics.spreadCapture, adv: s.metrics.adverse, fees: s.fees, fills: s.metrics.rfqFills, rfqs: s.rfqs.length });
+    const s = playChallenge(st, 2000 + k * 41);
+    const lb = s.leaderboard();
+    runs.push({
+      score: lb.myScore,
+      rank: lb.rank,
+      topBand: Math.max(1, Math.round(100 - lb.topPct)),
+      ibPnl: s.roundHistory[0]?.pnl ?? 0,
+      ibComm: s.roundHistory[0]?.commission ?? 0,
+      amPnl: s.roundHistory[1]?.pnl ?? 0,
+    });
   }
-  const pnls = res.map((r) => r.pnl).sort((a, b) => a - b);
-  const mean = pnls.reduce((a, b) => a + b, 0) / N;
-  const med = pnls[Math.floor(N / 2)];
-  const p90 = pnls[Math.floor(N * 0.9)];
-  const p10 = pnls[Math.floor(N * 0.1)];
-  const fills = res.reduce((a, b) => a + b.fills, 0) / N;
-  const rfqs = res.reduce((a, b) => a + b.rfqs, 0) / N;
-  const cap = res.reduce((a, b) => a + b.cap, 0) / N;
-  const adv = res.reduce((a, b) => a + b.adv, 0) / N;
-  const fees = res.reduce((a, b) => a + b.fees, 0) / N;
-  const f = (v) => Math.round(v).toLocaleString('fr-FR');
-  console.log(name.padEnd(30), f(mean).padStart(11), f(med).padStart(11), f(p90).padStart(11), f(p10).padStart(11), f(cap).padStart(10), f(adv).padStart(9), fills.toFixed(1).padStart(7), rfqs.toFixed(0).padStart(6));
+  const avg = (fn) => runs.reduce((a, r) => a + fn(r), 0) / N;
+  console.log(
+    name.padEnd(34),
+    `| Score: ${avg((r) => r.score).toFixed(1)}/100`,
+    `| Rang moy: #${Math.round(avg((r) => r.rank))}/260 (Top ${Math.round(avg((r) => r.topBand))}%)`,
+    `| IB P+L: $${Math.round(avg((r) => r.ibPnl)).toLocaleString('en-US')} (Comm +$${Math.round(avg((r) => r.ibComm)).toLocaleString('en-US')})`,
+    `| AM P+L: $${Math.round(avg((r) => r.amPnl)).toLocaleString('en-US')}`
+  );
 }
-
-// seuil top 10 % du classement
-const s = new Session({ id: 'lb', seed: 42, nickname: 'BOT' });
-s.round = ROUNDS;
-s.phase = 'done';
-const lb = s.leaderboard();
-console.log(`\nClassement : ${lb.total} participants — seuil top 10 % = ${Math.round(lb.firstThreshold).toLocaleString('fr-FR')} $`);
-const totals = s.botPool.map((b) => b.rounds.reduce((a, c) => a + c, 0)).sort((a, b) => b - a);
-console.log('Bots — p50:', Math.round(totals[Math.floor(totals.length / 2)]), '| p75:', Math.round(totals[Math.floor(totals.length * 0.25)]), '| p90:', Math.round(totals[Math.floor(totals.length * 0.10)]), '| p99:', Math.round(totals[Math.floor(totals.length * 0.01)]));

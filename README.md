@@ -1,147 +1,56 @@
-# TradeLab — simulateur d'entraînement au market making
+# AMPLIFY Simulator Trainer — Préparation CFA Institute × AmplifyME
 
-Un desk de marché jouable dans le navigateur : on reçoit des **demandes de prix (RFQ)** de clients,
-on cote un **bid / offer**, on gère le **flux informé** et on essaie de finir dans le **top 10 %**
-du classement.
+Simulateur d'entraînement haute fidélité conçu pour reproduire l'interface, les mécaniques de marché et le barème d'évaluation du **CFA Institute × AmplifyME Investing Simulator Challenge** afin de s'entraîner dans les conditions réelles et viser le **Top 10 % qualificatif** (Finale Globale & bourses *CFA® Program Scholarship*).
 
-Le simulateur reprend le format des challenges de trading type « cotation continue + flux clients +
-classement » (carnet d'ordres, news, contreparties, blotter, P&L réalisé/non réalisé, commissions),
-avec un moteur et des contenus **originaux**. Aucune affiliation avec un organisme, aucun argent réel.
+> Simulateur pédagogique indépendant — aucune affiliation officielle avec le CFA Institute ou AmplifyME, aucun argent réel.
 
 ---
 
-## Déploiement en un clic
+## Ce qui est simulé (100 % conforme au format du Challenge)
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Calvin29990/Traineur-calvin)
+### 1. Rotation sur les 2 Rôles Officiels
+- **Sell-Side — Investment Bank Trader (`IB 1`)** :
+  - Flux clients en direct dans le **Chat** (`hf1test1 / HF 1` à `HF 3`, `am1test1 / AM 1` à `AM 2`) + relance commerciale proactive (*Sales Trading*).
+  - Saisie manuelle des cotations dans le ticket **`SEND QUOTE`** (`Ticker`, `Valid for seconds`, `Bid Price`, `Offer Price`, `Bid Volume`, `Offer Volume`) ou via la commande `@quote BP 54 56 50000 50000` dans le Chat.
+  - Suivi en temps réel dans **`LIVE CHAT QUOTES`** et **`OLD CHAT QUOTES`** avec possibilité d'annuler (`✕`) immédiatement une cotation ouverte lorsqu'une actualité tombe (*anti-sniping*).
+  - **Commissions positives (`+12 bps`)** encaissées sur chaque transaction client (`Total P+L = Realised P+L + Unrealised P+L + Commission`).
+  - Débouclage de l'inventaire sur le panneau **`EXCHANGE`** avec **profondeur de marché dynamique (*Market Depth*)** : liquider en petites tranches (`10k–15k`) coûte beaucoup moins cher que de liquider un bloc entier d'un seul clic.
+- **Buy-Side — Asset Manager (`AM 1` · Portefeuille de 20 000 000 $)** :
+  - Gestion active Long / Short d'un fonds actions de **20 M$** face aux annonces **`MACRO`** et microéconomiques.
+  - Double canal d'exécution : **demande de cotation bloc (`REQUEST QUOTE` / `@rfq`)** auprès des banques d'investissement (`IB 1`, `IB 2`, `IB 3`) avec comparaison dans `LIVE CHAT QUOTES`, ou exécution instantanée sur **`EXCHANGE`**.
+  - Contraintes de mandat et de diversification (limite de concentration de 8 M$ / 40 % par titre, exposition brute max 25 M$).
 
-| plateforme | marche à suivre | config incluse |
-|---|---|---|
-| **Render** | bouton ci-dessus, ou *New → Web Service* → ce dépôt | `render.yaml` |
-| **Railway** | *New Project → Deploy from GitHub repo* → ce dépôt | `railway.json` |
-| **Fly.io / VPS / Docker** | `docker build -t tradelab . && docker run -p 8788:8788 tradelab` | `Dockerfile` |
-| **Heroku-like** | détecte automatiquement le `Procfile` | `Procfile` |
+### 2. Interface Fidèle (Disposition 7 Panneaux AmplifyME FlowTrader)
+- **Barre supérieure** : `A M P L I F Y ▼`, horloge marché, `Realised P+L`, `Unrealised P+L`, `Commission`, `Total P+L`, lecteur audio *Trading Floor Squawk*, profil rôle (`IB 1` / `AM 1` · *Single User Mode*).
+- **Ligne supérieure (3 panneaux)** :
+  1. `1. EQUITIES` (`TICKER`, `REFPRICE` avec flèche de tick `↑/↓`, `% CHG`, `TYPE: Equity O` + zone d'épinglage rapide)
+  2. `NEWS WIRE` (`Search keywords 🔍`, colonnes `TICKER` [`MACRO`, actions, `NOTE`] & `HEADLINE`)
+  3. `POSITIONS` | `TRADE BLOTTER` | `RISK / $20M MANDATE` (maintien des lignes soldées avec leur `REALISED P/L` et `NET P/L`)
+- **Ligne inférieure (4 panneaux)** :
+  1. `CHAT` (`Search name or team`, `Deal Room`, `IB Room`, salons contreparties + `SEND MESSAGE` / `@quote`)
+  2. `QUOTE TICKET` + `LIVE CHAT QUOTES` / `OLD CHAT QUOTES`
+  3. `EXCHANGE` (vérificateur de profondeur `Enter volume to check market depth ↵`, `SELL` / `BUY`, `NOTIONAL VALUE`, `COMMISSION`)
+  4. `CHART` (`PRICE / VOLUME`, `LINE / CANDLESTICK`, indicateur `SMA`, `Zoom 5min..All`, navigateur temporel bas)
 
-Le serveur lit le port dans la variable d'environnement `PORT` (8788 par défaut) et écoute sur `0.0.0.0`.
-Commande de build : `npm ci && npm run build` — commande de démarrage : `node server/index.js`.
-
-> **À savoir**
-> - Le jeu a besoin d'un **serveur Node persistant** (WebSocket + moteur de marché en mémoire) :
->   un hébergement purement statique (GitHub Pages, export statique Netlify/Vercel) ne suffit pas.
-> - Une seule instance : les sessions vivent en mémoire, pas de mise à l'échelle horizontale.
-> - Sur une offre gratuite, l'instance s'endort après inactivité : la session de jeu en cours est perdue,
->   l'application redémarre proprement au chargement suivant.
+### 3. Scoring Multi-Critères AmplifyME & Détection des *Fat Fingers*
+- Score sur **100 points** combinant P+L / ROI, flux & commissions clients, discipline de risque / débouclage, qualité d'exécution (IB vs Exchange) et **Fat Finger Count (`FFC`)**.
 
 ---
 
-## Démarrage
+## Démarrage local & Déploiement Render
 
 ```bash
 npm install
-npm run serve        # build + serveur unique sur http://localhost:8788
+npm run serve        # compile le front (Vite) et démarre le serveur sur http://0.0.0.0:8788
 ```
 
-En développement (rechargement à chaud + proxy API) :
+Scripts de vérification et calibrage :
 
 ```bash
-npm run dev          # vite sur :5173, qui relaie /api et /ws vers :8788
-npm start            # API + moteur de marché sur :8788 (à lancer en parallèle)
+npm run balance              # benchmark des stratégies (Débutant vs Intermédiaire vs Playbook Top 10%)
+node scripts/playtest.js     # simule une session complète 2 rounds (IB 1 -> AM 1)
+node scripts/render-test.mjs # test de rendu SSR de tous les composants
+node scripts/smoke.mjs       # test bout-en-bout WebSocket
 ```
 
-Autres scripts :
-
-| commande | usage |
-|---|---|
-| `npm run balance` | fait jouer plusieurs stratégies au moteur et compare les P&L (calibrage) |
-| `node scripts/smoke.mjs` | test de bout en bout du protocole (session complète) |
-| `node scripts/render-test.mjs` | rendu SSR de tous les composants avec un état réel |
-
----
-
-## Comment on joue
-
-1. **Un client arrive** (hedge fund, asset manager, corporate…). Il demande un prix sur une action
-   pour un volume donné. Vous avez 30 s pour répondre.
-2. **Vous cotez** : un bid (où vous achetez) et un offer (où vous vendez). L'écart est votre **spread**,
-   votre marge si le prix ne bouge pas.
-3. **Le client décide** : s'il juge votre prix bon, il traite. Vous devenez acheteur ou vendeur.
-4. **Le marché bouge** : si le prix part contre vous après l'exécution, c'est la **sélection adverse**.
-   C'est là que se joue la différence entre un bon et un mauvais market maker.
-5. **Vous couvrez** l'exposition toxique au marché (spread + commission) ou vous la gardez si le flux
-   est sain.
-
-### Les trois leviers
-
-- **Spread** : large = peu d'exécutions mais bonne marge ; serré = beaucoup de volume mais vous êtes
-  la contrepartie facile du flux informé.
-- **Skew** : décale les deux prix. Skew positif = vous pensez que le vrai prix est plus haut.
-  Après une news haussière, un skew de +10 à +20 bps transforme une perte en gain.
-- **Taille** : coter moins que la demande sur un client suspect limite l'exposition sans refuser le flux.
-
-### Lire le marché
-
-| signal | où | ce que ça dit |
-|---|---|---|
-| News | panneau « Fil d'actualité » | le « vrai prix » vient de changer ; le marché converge en 20-40 s |
-| Flux 45 s | colonne du panneau Equities | sens des trades clients récents, un flux massif et unidirectionnel est un signal |
-| Deal Room | chat | couleur du desk (indicatif, parfois faux) |
-| Badge PRESSÉ | carte RFQ | client agressif, souvent informé |
-
-Le graphique affiche aussi des **triangles** aux prix où les clients vous ont exécuté
-(vert = le client achète, rouge = il vend) : c'est la lecture de la tape.
-
-### Règles et limites
-
-- 3 rounds de 3 minutes (configurable de 1 à 5).
-- Limite de **6 M$ de notionnel par titre** et **15 M$ de risque brut**.
-- Couverture au marché : ≈ 11 bps de coût (0,6 % de spread + 0,5 % de commission par côté).
-- En fin de round, les positions restantes sont **soldées au marché** : votre P&L de round est définitif.
-- Classement mis à jour en continu ; l'objectif affiché est le **seuil du top 10 %**.
-
-### Repères de calibrage (session de 3 rounds)
-
-| profil | P&L médian | commentaire |
-|---|---|---|
-| cotation 8 bps serrée, sans couverture | ≈ −35 000 $ | la contrepartie facile du flux informé |
-| cotation 12 bps symétrique | ≈ +23 000 $ | correct, mais fragile |
-| cotation 20 bps / skew après news | ≈ +32 000 à +60 000 $ | le seuil du top 10 % tourne autour de 38 000 $ |
-| couverture systématique | ≈ −10 000 $ | couvrir coûte plus que le spread capturé |
-
-C'est la combinaison **spread large + skew dans le sens de la news + couverture sélective**
-qui fait la différence entre le milieu et le haut du classement.
-
-### Raccourcis
-
-`Entrée` envoyer le prix · `P` passer la demande · `H` couvrir la plus grosse position ·
-`Espace` pause · `1`/`2`/`3` vitesse (0,5x / 1x / 2x) · `K` classement
-
----
-
-## Architecture
-
-```
-server/
-  content.js    instruments, actualités, profils de clients, ambiance du desk
-  engine.js     moteur autoritaire : prix, news, RFQ, exécution, P&L, classement, coach
-  index.js      express + websocket (état poussé 4x/s), sessions en mémoire
-src/
-  App.jsx       disposition du desk, raccourcis, modales
-  components/   panneaux (equities, news, positions, chat, RFQ, bourse, graphique)
-  lib/chart.js  rendu canvas du graphique (ligne / chandeliers / aire, volume, marqueurs)
-scripts/        calibrage et tests
-```
-
-Le moteur tourne côté serveur : le client envoie des **intentions** (`quote`, `pass`, `trade`,
-`hedge`, `chat`) et reçoit un **snapshot complet** à ~4 Hz. Aucune logique de prix côté navigateur.
-
-## Notes de calibrage
-
-`npm run balance` simule plusieurs profils de joueurs sur des dizaines de sessions pour vérifier que :
-
-- une cotation symétrique serrée perd de l'argent (sélection adverse) ;
-- un skew dans le sens de l'information et une couverture sélective gagnent ;
-- le seuil du top 10 % reste atteignable en une session de trois rounds.
-
----
-
-Simulateur pédagogique indépendant. Les prix, actualités et contreparties sont générés
-par le moteur : rien n'est réel et rien ne constitue un conseil d'investissement.
+Compatible déploiement 1-clic sur **Render** (`render.yaml`), **Railway** (`railway.json`) et **Docker** (`Dockerfile`).

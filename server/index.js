@@ -28,7 +28,8 @@ app.get('/api/health', (_req, res) => res.json({ ok: true, sessions: sessions.si
 
 app.get('/api/leaderboard-sample', (_req, res) => {
   const s = new Session({ id: 'sample', seed: 1234 });
-  s.round = s.roundsTotal; s.phase = 'done';
+  s.round = s.roundsTotal;
+  s.phase = 'done';
   res.json(s.leaderboard());
 });
 
@@ -45,13 +46,15 @@ function newSession(nickname, opts = {}) {
     seed: opts.seed,
     rounds: opts.rounds,
     roundSeconds: opts.roundSeconds,
-    nickname: nickname || 'Vous',
+    mode: opts.mode || 'challenge',
+    startRole: opts.startRole || 'IB',
+    assistMode: Boolean(opts.assistMode),
+    nickname: nickname || 'calvin',
   });
   sessions.set(id, { s, sockets: new Set(), lastSent: 0, lastAction: Date.now() });
   return sessions.get(id);
 }
 
-// boucle globale 250 ms
 const TICK = 250;
 setInterval(() => {
   const now = Date.now();
@@ -67,7 +70,6 @@ setInterval(() => {
         }
       }
     }
-    // nettoyage des sessions inactives > 3 h
     if (now - entry.lastAction > 3 * 3600 * 1000) {
       for (const ws of entry.sockets) { try { ws.close(); } catch { /* ignore */ } }
       sessions.delete(id);
@@ -75,9 +77,13 @@ setInterval(() => {
   }
 }, TICK);
 
-function broadcastError(entry, message) {
-  const payload = JSON.stringify({ type: 'error', message });
-  for (const ws of entry.sockets) if (ws.readyState === 1) ws.send(payload);
+function broadcastToast(entry, message, kind = 'err') {
+  const payload = JSON.stringify({ type: kind === 'err' ? 'error' : 'info', message });
+  for (const ws of entry.sockets) {
+    if (ws.readyState === 1) {
+      try { ws.send(payload); } catch { /* ignore */ }
+    }
+  }
 }
 
 wss.on('connection', (ws) => {
@@ -94,11 +100,19 @@ wss.on('connection', (ws) => {
       if (msg.sessionId && sessions.has(msg.sessionId)) {
         entry = sessions.get(msg.sessionId);
       } else {
-        entry = newSession(msg.nickname, { rounds: msg.rounds, roundSeconds: msg.roundSeconds, seed: msg.seed });
+        entry = newSession(msg.nickname, {
+          rounds: msg.rounds,
+          roundSeconds: msg.roundSeconds,
+          seed: msg.seed,
+          mode: msg.mode,
+          startRole: msg.startRole,
+          assistMode: msg.assistMode,
+        });
       }
       entry.sockets.add(ws);
       entry.lastAction = Date.now();
       ws.send(JSON.stringify({ type: 'joined', sessionId: entry.s.id }));
+      ws.send(JSON.stringify({ type: 'state', data: entry.s.snapshot() }));
       return;
     }
 
@@ -110,7 +124,12 @@ wss.on('connection', (ws) => {
       case 'start': {
         if (s.phase === 'briefing') {
           if (msg.nickname) s.nickname = String(msg.nickname).slice(0, 22);
-          if (msg.rounds) s.roundsTotal = Math.max(1, Math.min(10, Number(msg.rounds)));
+          if (msg.mode && ['challenge', 'ib', 'am'].includes(msg.mode)) s.mode = msg.mode;
+          if (msg.startRole && ['IB', 'AM'].includes(msg.startRole)) s.startRole = msg.startRole;
+          if (typeof msg.assistMode === 'boolean') s.assistMode = msg.assistMode;
+          if (msg.rounds) s.roundsTotal = Math.max(1, Math.min(6, Number(msg.rounds)));
+          if (msg.roundSeconds) s.roundSeconds = Math.max(90, Math.min(1800, Number(msg.roundSeconds)));
+          s.botPool = s.buildBotPool();
           s.beginRound();
         }
         break;
@@ -124,58 +143,124 @@ wss.on('connection', (ws) => {
         }
         break;
       }
-      case 'closeDebrief': s.debrief = s.debrief ? { ...s.debrief, open: false } : null; break;
+      case 'closeDebrief':
+        s.debrief = s.debrief ? { ...s.debrief, open: false } : null;
+        break;
       case 'restart': {
-        const ns = newSession(s.nickname, { rounds: s.roundsTotal, roundSeconds: s.roundSeconds });
+        const ns = newSession(s.nickname, {
+          rounds: msg.rounds ?? s.roundsTotal,
+          roundSeconds: msg.roundSeconds ?? s.roundSeconds,
+          mode: msg.mode ?? s.mode,
+          startRole: msg.startRole ?? s.startRole,
+          assistMode: msg.assistMode ?? s.assistMode,
+        });
         entry.sockets.delete(ws);
         entry = ns;
         entry.sockets.add(ws);
         ws.send(JSON.stringify({ type: 'joined', sessionId: entry.s.id }));
+        ws.send(JSON.stringify({ type: 'state', data: entry.s.snapshot() }));
+        break;
+      }
+      case 'sendQuote': {
+        const r = s.sendQuote({
+          clientRoom: msg.clientRoom,
+          ticker: msg.ticker,
+          bid: msg.bid,
+          offer: msg.offer,
+          bidVol: msg.bidVol,
+          offerVol: msg.offerVol,
+          validFor: msg.validFor,
+          rfqId: msg.rfqId,
+        });
+        if (r.error) broadcastToast(entry, r.error, 'err');
+        break;
+      }
+      case 'cancelQuote': {
+        const r = s.cancelQuote(msg.quoteId);
+        if (r.error) broadcastToast(entry, r.error, 'err');
+        break;
+      }
+      case 'requestQuote': {
+        const r = s.requestQuote({
+          dealerRoom: msg.dealerRoom,
+          ticker: msg.ticker,
+          qty: msg.qty,
+        });
+        if (r.error) broadcastToast(entry, r.error, 'err');
+        break;
+      }
+      case 'acceptQuote': {
+        const r = s.acceptDealerQuote({
+          quoteId: msg.quoteId,
+          side: msg.side,
+          qty: msg.qty,
+        });
+        if (r.error) broadcastToast(entry, r.error, 'err');
         break;
       }
       case 'quote': {
         const r = s.quoteRfq(msg.rfqId, msg.bid, msg.offer, msg.bidVol, msg.offerVol, msg.ttl);
-        if (r.error) broadcastError(entry, r.error);
+        if (r.error) broadcastToast(entry, r.error, 'err');
         break;
       }
       case 'pass': {
         const r = s.passRfq(msg.rfqId);
-        if (r.error) broadcastError(entry, r.error);
+        if (r.error) broadcastToast(entry, r.error, 'err');
         break;
       }
       case 'trade': {
         const r = s.tradeExchange(msg.ticker, msg.side, msg.qty);
-        if (r.error) broadcastError(entry, r.error);
+        if (r.error) broadcastToast(entry, r.error, 'err');
         break;
       }
       case 'hedge': {
         const r = s.hedge(msg.ticker);
-        if (r.error) broadcastError(entry, r.error);
+        if (r.error) broadcastToast(entry, r.error, 'err');
         break;
       }
       case 'flatten': {
         for (const t of Object.keys(s.positions)) {
           if (s.positions[t].qty !== 0) {
-            const p = s.positions[t];
             s.hedgeCooldown = 0;
-            s.hedge(t);
+            const qty = Math.abs(s.positions[t].qty);
+            s.tradeExchange(t, s.positions[t].qty > 0 ? 'SELL' : 'BUY', qty);
           }
         }
         break;
       }
-      case 'chat': s.chat(msg.room || 'deal', msg.text); break;
-      case 'chart': s.setChartTicker(msg.ticker); break;
-      case 'speed': s.speed = [0.5, 1, 2, 4].includes(msg.value) ? msg.value : s.speed; break;
-      case 'pause': s.paused = !s.paused; break;
-      case 'skipRound': if (s.phase === 'round') s.simTime = s.roundSeconds; break;
-      default: break;
+      case 'chat': {
+        const r = s.chat(msg.room || 'deal', msg.text);
+        if (r?.error) broadcastToast(entry, r.error, 'err');
+        break;
+      }
+      case 'chart':
+        s.setChartTicker(msg.ticker);
+        break;
+      case 'watchTicker':
+        s.toggleWatchTicker(msg.ticker);
+        break;
+      case 'toggleAssist':
+        s.assistMode = !s.assistMode;
+        break;
+      case 'speed':
+        s.speed = [0.5, 1, 2, 4].includes(msg.value) ? msg.value : s.speed;
+        break;
+      case 'pause':
+        s.paused = !s.paused;
+        break;
+      case 'skipRound':
+        if (s.phase === 'round') s.simTime = s.roundSeconds;
+        break;
+      default:
+        break;
     }
   });
 
-  ws.on('close', () => { if (entry) entry.sockets.delete(ws); });
+  ws.on('close', () => {
+    if (entry) entry.sockets.delete(ws);
+  });
 });
 
-// fallback SPA
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api') || req.path.startsWith('/ws')) return next();
   const index = path.join(dist, 'index.html');
@@ -184,5 +269,5 @@ app.get('*', (req, res, next) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[tradelab] http://0.0.0.0:${PORT}`);
+  console.log(`[amplify-sim] http://0.0.0.0:${PORT}`);
 });
