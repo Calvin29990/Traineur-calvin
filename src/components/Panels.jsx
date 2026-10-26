@@ -1,366 +1,575 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  cls, pct, compact, usd, usdSign, price as px, signCls, money, num,
+  cls, pct, money, price as px, refPriceStr, shares,
 } from '../lib/format.js';
 
-/* ------------------------------------------------------------------ spark */
-function Spark({ data, up, width = 46, height = 16 }) {
-  if (!data || data.length < 2) return <svg className="spark" width={width} height={height} />;
-  const lo = Math.min(...data), hi = Math.max(...data);
-  const span = hi - lo || 1;
-  const pts = data.map((v, i) => `${(i / (data.length - 1)) * width},${height - ((v - lo) / span) * (height - 2) - 1}`);
-  return (
-    <svg className="spark" width={width} height={height}>
-      <polyline
-        points={pts.join(' ')}
-        fill="none"
-        stroke={up ? 'var(--green)' : 'var(--red)'}
-        strokeWidth="1.2"
-        strokeLinejoin="round"
-        opacity="0.9"
-      />
-    </svg>
-  );
-}
-
-/* -------------------------------------------------------------- equities */
-export function EquitiesPanel({ state, send }) {
-  const [q, setQ] = useState('');
+/* =============================================================== 1. EQUITIES */
+export function EquitiesPanel({ state, send, onSelectTicker }) {
+  const [sortCol, setSortCol] = useState('default');
+  const [sortAsc, setSortAsc] = useState(true);
   const equities = state?.equities ?? [];
   const selected = state?.chart?.ticker;
-  const posMap = useMemo(() => {
-    const m = {};
-    (state?.positions ?? []).forEach((p) => { m[p.ticker] = p; });
-    return m;
-  }, [state?.positions]);
-  const rows = equities.filter((e) =>
-    !q || e.ticker.toLowerCase().includes(q.toLowerCase()) || e.name.toLowerCase().includes(q.toLowerCase()));
+  const watched = state?.watchedTickers ?? [];
+
+  const toggleSort = (col) => {
+    if (sortCol === col) setSortAsc(!sortAsc);
+    else { setSortCol(col); setSortAsc(true); }
+  };
+
+  const rows = useMemo(() => {
+    const arr = [...equities];
+    if (sortCol === 'ticker') arr.sort((a, b) => (sortAsc ? a.ticker.localeCompare(b.ticker) : b.ticker.localeCompare(a.ticker)));
+    else if (sortCol === 'ref') arr.sort((a, b) => (sortAsc ? a.last - b.last : b.last - a.last));
+    else if (sortCol === 'chg') arr.sort((a, b) => (sortAsc ? a.chgPct - b.chgPct : b.chgPct - a.chgPct));
+    return arr;
+  }, [equities, sortCol, sortAsc]);
+
+  const handlePick = (tk) => {
+    send({ type: 'chart', ticker: tk });
+    if (onSelectTicker) onSelectTicker(tk);
+  };
 
   return (
-    <div className="panel area-equities">
-      <div className="panel-head">
-        <span className="panel-title"><span className="idx">1</span> EQUITIES</span>
-        <div className="spacer" />
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Rechercher…"
-          style={{ width: 104, height: 19, padding: '0 6px', fontSize: 10 }}
-        />
+    <section className="amp-panel area-equities">
+      <div className="amp-tabbar">
+        <button type="button" className="amp-tab active">1. EQUITIES</button>
       </div>
-      <div className="panel-body">
-        <table className="grid">
+
+      <div className="amp-panel-body">
+        <table className="amp-table">
           <thead>
             <tr>
-              <th>Ticker</th>
-              <th>Dernier</th>
-              <th>% Chg</th>
-              <th>Flux 45s</th>
-              <th style={{ textAlign: 'center' }}>Tendance</th>
+              <th onClick={() => toggleSort('ticker')} className="sortable">
+                TICKER <span className="sort-ico">{sortCol === 'ticker' ? (sortAsc ? '▲' : '▼') : '▴▾'}</span>
+              </th>
+              <th onClick={() => toggleSort('ref')} className="sortable num-col">
+                REFPRICE <span className="sort-ico">{sortCol === 'ref' ? (sortAsc ? '▲' : '▼') : '▴▾'}</span>
+              </th>
+              <th onClick={() => toggleSort('chg')} className="sortable num-col">
+                % CHG <span className="sort-ico">{sortCol === 'chg' ? (sortAsc ? '▲' : '▼') : '▴▾'}</span>
+              </th>
+              <th className="num-col">
+                TYPE <span className="sort-ico">▴▾</span>
+              </th>
             </tr>
           </thead>
           <tbody>
             {rows.map((e) => {
-              const pos = posMap[e.ticker];
-              const up = e.chgPct >= 0;
-              const net = e.flow?.net ?? 0;
-              const tot = (e.flow?.buy ?? 0) + (e.flow?.sell ?? 0);
-              const buyW = tot > 0 ? ((e.flow?.buy ?? 0) / tot) * 100 : 50;
+              const tickUp = e.dir >= 0;
+              const chgUp = e.chgPct >= 0;
               return (
                 <tr
                   key={e.ticker}
                   className={cls('clickable', selected === e.ticker && 'selected')}
-                  onClick={() => send({ type: 'chart', ticker: e.ticker })}
+                  onClick={() => handlePick(e.ticker)}
+                  onDoubleClick={() => send({ type: 'watchTicker', ticker: e.ticker })}
+                  title="Click to select across Quote, Exchange & Chart · Double-click to pin below"
                 >
-                  <td>
-                    <div className="tk">
-                      {pos && <span className="pos-dot" title={`Position ${pos.qty}`} />}
-                      {e.ticker}
-                    </div>
-                    <div className="sub">{e.sector}</div>
+                  <td className="tk-cell">{e.ticker}</td>
+                  <td className={cls('num-col mono', tickUp ? 'pos' : 'neg')}>
+                    {refPriceStr(e.last)} <span className="dir-arrow">{tickUp ? '↑' : '↓'}</span>
                   </td>
-                  <td>
-                    <div className="mono" style={{ fontSize: 11.5, color: '#eaf7ff' }}>{px(e.last)}</div>
-                    <div className="sub mono" style={{ fontSize: 8.6 }}>ref {px(e.ref)}</div>
+                  <td className={cls('num-col mono', chgUp ? 'pos' : 'neg')}>
+                    {pct(e.chgPct, 2)}
                   </td>
-                  <td>
-                    <span className={cls('chg-pill', up ? 'up' : 'down')}>{pct(e.chgPct)}</span>
-                  </td>
-                  <td>
-                    <div className="flow-wrap">
-                      <div className="flow-bar" title={`Achats clients ${compact(Math.round((e.flow?.buy ?? 0)))} $ / ventes ${compact(Math.round(e.flow?.sell ?? 0))} $`}>
-                        <i className="b" style={{ width: `${buyW}%` }} />
-                        <i className="s" style={{ width: `${100 - buyW}%` }} />
-                      </div>
-                      <span className={cls('flow-txt', net > 0 ? 'pos' : net < 0 ? 'neg' : 'dim')}>
-                        {net > 0 ? '▲' : net < 0 ? '▼' : '—'}
-                      </span>
-                    </div>
-                  </td>
-                  <td style={{ textAlign: 'center' }}>
-                    <Spark data={e.spark} up={up} />
-                  </td>
+                  <td className="num-col type-cell">{e.type || 'Equity O'}</td>
                 </tr>
               );
             })}
+          </tbody>
+        </table>
+
+        {/* AmplifyME dashed quick-watch slot beneath Equities table (matches image-1.png) */}
+        <div className="amp-watch-slot">
+          {watched.length === 0 ? (
+            <span className="watch-placeholder">Double-click a ticker above to pin quick-watch</span>
+          ) : (
+            watched.map((tk) => {
+              const eq = equities.find((x) => x.ticker === tk);
+              if (!eq) return null;
+              return (
+                <button
+                  key={tk}
+                  type="button"
+                  className={cls('watch-chip', selected === tk && 'active')}
+                  onClick={() => handlePick(tk)}
+                >
+                  <b>{tk}</b>
+                  <span className={eq.chgPct >= 0 ? 'pos' : 'neg'}>${px(eq.last)}</span>
+                </button>
+              );
+            })
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/* ================================================================ NEWS WIRE */
+export function NewsPanel({ state, onSelectTicker, send }) {
+  const [q, setQ] = useState('');
+  const [openId, setOpenId] = useState(null);
+  const news = state?.news ?? [];
+  const assistMode = state?.assistMode;
+
+  const rows = useMemo(() => {
+    const term = q.trim().toLowerCase();
+    if (!term) return news;
+    return news.filter(
+      (n) =>
+        (n.ticker || '').toLowerCase().includes(term) ||
+        (n.headline || '').toLowerCase().includes(term) ||
+        (n.detail || '').toLowerCase().includes(term)
+    );
+  }, [news, q]);
+
+  const topId = news[0]?.id;
+
+  const handleRowClick = (n) => {
+    setOpenId((cur) => (cur === n.id ? null : n.id));
+    if (n.kind === 'STOCK' && n.ticker) {
+      send?.({ type: 'chart', ticker: n.ticker });
+      onSelectTicker?.(n.ticker);
+    }
+  };
+
+  return (
+    <section className="amp-panel area-news">
+      <div className="amp-news-search">
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search keywords"
+          aria-label="Search news keywords"
+        />
+        <span className="search-ico" aria-hidden="true">🔍</span>
+      </div>
+
+      <div className="amp-panel-body">
+        <table className="amp-table news-table">
+          <thead>
+            <tr>
+              <th style={{ width: 62 }}>TICKER</th>
+              <th>HEADLINE</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((n) => {
+              const isOpen = openId === n.id;
+              return (
+                <React.Fragment key={n.id}>
+                  <tr
+                    className={cls('clickable news-row', n.id === topId && 'fresh', isOpen && 'selected')}
+                    onClick={() => handleRowClick(n)}
+                  >
+                    <td className={cls('news-tk', n.kind === 'MACRO' && 'macro', n.kind === 'NOTE' && 'note')}>
+                      {n.ticker || n.kind}
+                    </td>
+                    <td className="news-hl">
+                      <span>{n.headline}</span>
+                      <span className="news-time-inline">{n.time}</span>
+                    </td>
+                  </tr>
+                  {isOpen && n.detail && (
+                    <tr className="news-detail-row">
+                      <td colSpan={2}>
+                        <div className="news-wire-box">
+                          <div>{n.detail}</div>
+                          {assistMode && n.frHint && (
+                            <div className="news-fr-hint">💡 Coach : {n.frHint}</div>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
             {!rows.length && (
-              <tr><td colSpan={5} className="empty">Aucun titre</td></tr>
+              <tr>
+                <td colSpan={2} className="amp-empty">
+                  Waiting for market wire headlines…
+                </td>
+              </tr>
             )}
           </tbody>
         </table>
       </div>
-      <div className="panel-foot" style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: 'var(--muted)' }}>
-        <span>Cliquez un titre pour l'afficher sur le graphique</span>
-        <span className="mono">1 s sim = 15 s marché</span>
-      </div>
-    </div>
+    </section>
   );
 }
 
-/* ------------------------------------------------------------------- news */
-export function NewsPanel({ state }) {
-  const [open, setOpen] = useState(null);
-  const [q, setQ] = useState('');
-  const news = state?.news ?? [];
-  const rows = news.filter((n) => !q || n.headline.toLowerCase().includes(q.toLowerCase()));
-  const lastId = news[0]?.id;
-
-  return (
-    <div className="panel area-news">
-      <div className="panel-head">
-        <span className="panel-title">📡 Fil d'actualité</span>
-        <div className="spacer" />
-        <span className="badge src mono" style={{ fontSize: 8 }}>{news.length} PUBLI.</span>
-      </div>
-      <div className="panel-body">
-        {!rows.length && (
-          <div className="empty">
-            <div style={{ fontSize: 20, marginBottom: 6 }}>📰</div>
-            Les publications arriveront pendant le round.<br />
-            Une news = un flux informé dans les secondes qui suivent.
-          </div>
-        )}
-        <div className="news-list">
-          {rows.map((n) => {
-            const isOpen = open === n.id;
-            return (
-              <div
-                key={n.id}
-                className={cls('news-item', isOpen && 'open', n.id === lastId && 'fresh')}
-                onClick={() => setOpen(isOpen ? null : n.id)}
-              >
-                <div className="news-top">
-                  <span className={cls('news-tag', n.kind === 'MACRO' ? 'macro' : 'stock')}>
-                    {n.kind === 'MACRO' ? 'MACRO' : n.ticker}
-                  </span>
-                  <span className="news-time">{n.time}</span>
-                  {n.kind === 'MACRO' && <span className="badge warn" style={{ fontSize: 8 }}>TOUT LE MARCHÉ</span>}
-                </div>
-                <div className="news-head">{n.headline}</div>
-                {isOpen && (
-                  <div className="news-detail">
-                    {n.detail}
-                    <div className="impact dim">
-                      {n.kind === 'STOCK'
-                        ? `Impact estimé ${pct(n.impact * 100)} sur ${n.ticker} — corrige le flux client dans les prochaines secondes.`
-                        : `Choc transversal de ${pct(n.impact * 100)} amplifié par le bêta sectoriel de chaque titre.`}
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------- positions */
-export function PositionsPanel({ state, send }) {
+/* ============================================== POSITIONS & TRADE BLOTTER */
+export function PositionsPanel({ state, send, onSelectTicker }) {
   const [tab, setTab] = useState('pos');
+  const [sortCol, setSortCol] = useState('default');
+  const [sortAsc, setSortAsc] = useState(false);
+
   const positions = state?.positions ?? [];
   const blotter = state?.blotter ?? [];
   const risk = state?.risk;
+  const role = state?.role ?? 'IB';
+
+  const sortedPos = useMemo(() => {
+    const arr = [...positions];
+    if (sortCol === 'sec') arr.sort((a, b) => (sortAsc ? a.ticker.localeCompare(b.ticker) : b.ticker.localeCompare(a.ticker)));
+    else if (sortCol === 'pos') arr.sort((a, b) => (sortAsc ? a.qty - b.qty : b.qty - a.qty));
+    else if (sortCol === 'net') arr.sort((a, b) => (sortAsc ? a.netPnl - b.netPnl : b.netPnl - a.netPnl));
+    return arr;
+  }, [positions, sortCol, sortAsc]);
+
+  const toggleSort = (col) => {
+    if (sortCol === col) setSortAsc(!sortAsc);
+    else { setSortCol(col); setSortAsc(false); }
+  };
 
   return (
-    <div className="panel area-positions">
-      <div className="panel-head">
-        <span className="panel-title">POSITIONS</span>
-        <div className="tabs" style={{ marginLeft: 6 }}>
-          <button className={cls('tab', tab === 'pos' && 'active')} onClick={() => setTab('pos')}>Positions</button>
-          <button className={cls('tab', tab === 'blotter' && 'active')} onClick={() => setTab('blotter')}>Blotter</button>
-          <button className={cls('tab', tab === 'risk' && 'active')} onClick={() => setTab('risk')}>Risque</button>
-        </div>
+    <section className="amp-panel area-positions">
+      <div className="amp-tabbar">
+        <button
+          type="button"
+          className={cls('amp-tab', tab === 'pos' && 'active')}
+          onClick={() => setTab('pos')}
+        >
+          POSITIONS
+        </button>
+        <button
+          type="button"
+          className={cls('amp-tab', tab === 'blotter' && 'active')}
+          onClick={() => setTab('blotter')}
+        >
+          TRADE BLOTTER
+        </button>
+        <button
+          type="button"
+          className={cls('amp-tab', tab === 'risk' && 'active')}
+          onClick={() => setTab('risk')}
+          title="Exposure & Mandate Limits"
+        >
+          {role === 'AM' ? '$20M MANDATE' : 'RISK LIMITS'}
+        </button>
       </div>
 
-      <div className="panel-body">
+      <div className="amp-panel-body">
         {tab === 'pos' && (
-          <table className="grid">
+          <table className="amp-table pos-table">
             <thead>
-              <tr><th>Sec</th><th>Qty</th><th>Avg</th><th>Px</th><th>Unreal</th><th></th></tr>
+              <tr>
+                <th className="sortable" onClick={() => toggleSort('sec')}>SECURITY ▴▾</th>
+                <th className="num-col sortable" onClick={() => toggleSort('pos')}>NET<br />POS ▴▾</th>
+                <th className="num-col">AVG.<br />PRICE ▴▾</th>
+                <th className="num-col">POS.<br />VALUE($) ▴▾</th>
+                <th className="num-col">UNREALISED<br />P/L ▴▾</th>
+                <th className="num-col">REALISED<br />P/L ▴▾</th>
+                <th className="num-col sortable" onClick={() => toggleSort('net')}>NET<br />P/L ▴▾</th>
+              </tr>
             </thead>
             <tbody>
-              {positions.map((p) => (
-                <tr key={p.ticker}>
-                  <td><div className="tk">{p.ticker}</div></td>
-                  <td className={p.qty > 0 ? 'pos' : 'neg'}>{compact(p.qty)}</td>
-                  <td>{px(p.avg)}</td>
-                  <td>{px(p.mark)}</td>
-                  <td className={signCls(p.unreal)}>{usdSign(p.unreal)}</td>
-                  <td>
-                    <button className="btn tiny ghost" onClick={(ev) => { ev.stopPropagation(); send({ type: 'hedge', ticker: p.ticker }); }}>
-                      Couvrir
-                    </button>
+              {sortedPos.map((p) => (
+                <tr
+                  key={p.ticker}
+                  className="clickable"
+                  onClick={() => {
+                    send?.({ type: 'chart', ticker: p.ticker });
+                    onSelectTicker?.(p.ticker);
+                  }}
+                >
+                  <td className="tk-cell">{p.ticker}</td>
+                  <td className={cls('num-col mono', p.qty > 0 ? 'pos' : p.qty < 0 ? 'neg' : '')}>
+                    {shares(p.qty)}
+                  </td>
+                  <td className="num-col mono">{p.qty === 0 ? '0' : px(p.avg)}</td>
+                  <td className="num-col mono">{p.qty === 0 ? '0' : money(p.notional)}</td>
+                  <td className={cls('num-col mono', p.unreal > 0 ? 'pos' : p.unreal < 0 ? 'neg' : '')}>
+                    {money(p.unreal)}
+                  </td>
+                  <td className={cls('num-col mono', p.realised > 0 ? 'pos' : p.realised < 0 ? 'neg' : '')}>
+                    {money(p.realised)}
+                  </td>
+                  <td className={cls('num-col mono', p.netPnl > 0 ? 'pos' : p.netPnl < 0 ? 'neg' : '')}>
+                    {money(p.netPnl)}
                   </td>
                 </tr>
               ))}
-              {!positions.length && (
-                <tr><td colSpan={6} className="empty">Book à plat. Cotez des prix pour prendre du risque.</td></tr>
+              {!sortedPos.length && (
+                <tr>
+                  <td colSpan={7} className="amp-empty">
+                    {role === 'IB'
+                      ? 'No positions yet — send two-way quotes to HF / AM clients in Chat.'
+                      : 'No positions yet — deploy your $20,000,000 fund via IB Quotes or Exchange.'}
+                  </td>
+                </tr>
               )}
             </tbody>
           </table>
         )}
 
         {tab === 'blotter' && (
-          <table className="grid">
+          <table className="amp-table pos-table">
             <thead>
-              <tr><th>Hre</th><th>Côté</th><th>Qté</th><th>Prix</th><th>Source</th><th>Edge</th></tr>
+              <tr>
+                <th>TIME</th>
+                <th>SECURITY</th>
+                <th>SIDE</th>
+                <th className="num-col">VOLUME</th>
+                <th className="num-col">PRICE</th>
+                <th>VENUE</th>
+                <th className="num-col">COMM.</th>
+              </tr>
             </thead>
             <tbody>
               {blotter.map((b) => (
                 <tr key={b.id}>
-                  <td className="mono" style={{ fontSize: 9.5 }}>{b.clock}</td>
-                  <td><span className={cls('badge', b.side === 'BUY' ? 'buy' : 'sell')}>{b.side === 'BUY' ? 'ACH' : 'VEN'}</span></td>
-                  <td>{compact(b.qty)}</td>
-                  <td>{px(b.price)}</td>
-                  <td className="mono" style={{ fontSize: 8.8, color: 'var(--muted)' }}>
-                    {b.source === 'RFQ' ? (b.client?.split('-')[0] || 'RFQ') : 'MARCHÉ'}
+                  <td className="mono">{b.clock}</td>
+                  <td className="tk-cell">{b.ticker}</td>
+                  <td className={b.side === 'BUY' ? 'pos' : 'neg'}>{b.side}</td>
+                  <td className="num-col mono">{shares(b.qty)}</td>
+                  <td className="num-col mono">{px(b.price)}</td>
+                  <td className="mono">{b.venue || b.client || b.source}</td>
+                  <td className={cls('num-col mono', b.commSigned > 0 ? 'pos' : 'dim')}>
+                    {b.commSigned > 0 ? `+${money(b.commSigned)}` : money(b.commSigned)}
                   </td>
-                  <td className={signCls(b.capture)}>{money(b.capture)}</td>
                 </tr>
               ))}
-              {!blotter.length && <tr><td colSpan={6} className="empty">Aucune exécution</td></tr>}
+              {!blotter.length && (
+                <tr>
+                  <td colSpan={7} className="amp-empty">No trades executed in this round.</td>
+                </tr>
+              )}
             </tbody>
           </table>
         )}
 
         {tab === 'risk' && (
-          <div style={{ padding: 9, display: 'flex', flexDirection: 'column', gap: 9 }}>
-            <div>
-              <div className="row" style={{ justifyContent: 'space-between', marginBottom: 3 }}>
-                <span className="tiny-text upper dim">Risque brut</span>
-                <span className="mono tiny-text">{usd(risk?.gross ?? 0)} / {usd(risk?.limit ?? 0)}</span>
+          <div className="amp-risk-pane">
+            <div className="risk-summary-row">
+              <div>
+                <div className="risk-lbl">Gross Exposure</div>
+                <div className="mono">${money(risk?.gross ?? 0)} / ${money(risk?.limit ?? 20000000)}</div>
               </div>
-              <div className={cls('gauge', ((risk?.gross ?? 0) / (risk?.limit ?? 1)) > 0.8 ? 'bad' : ((risk?.gross ?? 0) / (risk?.limit ?? 1)) > 0.5 ? 'warn' : 'ok')}>
-                <i style={{ width: `${Math.min(100, ((risk?.gross ?? 0) / (risk?.limit ?? 1)) * 100)}%` }} />
-              </div>
-            </div>
-            {(risk?.perTicker ?? []).map((r) => (
-              <div key={r.ticker}>
-                <div className="row" style={{ justifyContent: 'space-between', marginBottom: 3 }}>
-                  <span className="mono tiny-text">{r.ticker}</span>
-                  <span className={cls('mono tiny-text', r.pct > 80 ? 'neg' : 'dim')}>{num(r.pct, 0)} % de la limite</span>
+              <div>
+                <div className="risk-lbl">Net Exposure</div>
+                <div className={cls('mono', (risk?.net ?? 0) >= 0 ? 'pos' : 'neg')}>
+                  ${money(risk?.net ?? 0)}
                 </div>
-                <div className={cls('gauge', r.pct > 80 ? 'bad' : r.pct > 50 ? 'warn' : 'ok')}>
+              </div>
+              {role === 'AM' && (
+                <div>
+                  <div className="risk-lbl">Portfolio Value</div>
+                  <div className="mono">${money(state?.pnl?.portfolioValue ?? 20000000)}</div>
+                </div>
+              )}
+            </div>
+
+            <div className="amp-gauge">
+              <i style={{ width: `${Math.min(100, ((risk?.gross ?? 0) / (risk?.limit || 1)) * 100)}%` }} />
+            </div>
+
+            {(risk?.perTicker ?? []).map((r) => (
+              <div key={r.ticker} className="risk-tk-row">
+                <div className="row" style={{ justifyContent: 'space-between', fontSize: 10 }}>
+                  <b className="mono">{r.ticker}</b>
+                  <span className="mono dim">
+                    ${money(r.notional)} ({Math.round(r.pct)}% of ${(risk.perTickerLimit / 1e6).toFixed(0)}M limit)
+                  </span>
+                </div>
+                <div className={cls('amp-gauge small', r.pct > 80 && 'danger')}>
                   <i style={{ width: `${Math.min(100, r.pct)}%` }} />
                 </div>
               </div>
             ))}
-            {!(risk?.perTicker ?? []).length && <div className="empty">Aucune position ouverte</div>}
-            <button className="btn tiny" onClick={() => send({ type: 'flatten' })} style={{ alignSelf: 'flex-start' }}>
-              Tout couvrir au marché
-            </button>
-            <div className="hint">
-              Limite : {usd(risk?.perTickerLimit ?? 6e6)} de notionnel par titre, {usd(risk?.limit ?? 15e6)} au total.
-              Au-delà, vos cotations et exécutions sont refusées par le risk manager.
+
+            <div className="row" style={{ marginTop: 6, justifyContent: 'space-between' }}>
+              <span className="dim" style={{ fontSize: 9.5 }}>
+                Tip: Unwind large inventory in 10k–15k clips on EXCHANGE to minimize depth slippage.
+              </span>
+              {positions.some((p) => p.qty !== 0) && (
+                <button type="button" className="amp-mini-btn" onClick={() => send({ type: 'flatten' })}>
+                  Flatten All
+                </button>
+              )}
             </div>
           </div>
         )}
       </div>
-    </div>
+    </section>
   );
 }
 
-/* ------------------------------------------------------------------- chat */
-export function ChatPanel({ state, send }) {
-  const [room, setRoom] = useState('ht');
+/* ============================================================== CHAT PANEL */
+export function ChatPanel({ state, send, activeRoom, onSelectRoom, onPrefillQuote }) {
+  const [search, setSearch] = useState('');
   const [text, setText] = useState('');
-  const [seen, setSeen] = useState({});
-  const listRef = React.useRef(null);
+  const [seenMap, setSeenMap] = useState({});
+  const listRef = useRef(null);
+
+  const rooms = state?.chatRooms ?? [
+    { id: 'deal', name: 'Deal Room', team: '', headerTitle: 'DEAL ROOM', subTitle: 'MULTI-DESK' },
+    { id: 'ib', name: 'IB Room', team: '', headerTitle: 'IB ROOM', subTitle: 'INTERNAL' },
+  ];
   const messages = state?.messages ?? [];
-  const roomMsgs = messages.filter((m) => m.room === room);
 
-  const unread = useMemo(() => {
-    const u = {};
-    for (const m of messages) {
-      if (!u[m.room]) u[m.room] = 0;
-      if (m.room !== room && m.id !== seen[m.room] && (seen[m.room] || '') < m.id) u[m.room] += 1;
+  // Ensure activeRoom is valid when roles switch between IB and AM
+  useEffect(() => {
+    if (!rooms.some((r) => r.id === activeRoom)) {
+      const firstContact = rooms.find((r) => r.team) || rooms[0];
+      if (firstContact && onSelectRoom) onSelectRoom(firstContact.id);
     }
-    return u;
-  }, [messages, room, seen]);
+  }, [rooms, activeRoom, onSelectRoom]);
 
-  React.useEffect(() => {
+  const currentRoom = rooms.find((r) => r.id === activeRoom) || rooms[0];
+  const roomMsgs = useMemo(
+    () => messages.filter((m) => m.room === currentRoom?.id),
+    [messages, currentRoom?.id]
+  );
+
+  // Track unread counts per room
+  const unread = useMemo(() => {
+    const out = {};
+    for (const r of rooms) {
+      const rMsgs = messages.filter((m) => m.room === r.id && m.kind !== 'me');
+      const lastSeenId = seenMap[r.id];
+      if (!rMsgs.length) { out[r.id] = 0; continue; }
+      if (!lastSeenId) {
+        out[r.id] = r.id === currentRoom?.id ? 0 : rMsgs.length;
+      } else {
+        const idx = rMsgs.findIndex((m) => m.id === lastSeenId);
+        out[r.id] = r.id === currentRoom?.id ? 0 : (idx === -1 ? rMsgs.length : rMsgs.length - 1 - idx);
+      }
+    }
+    return out;
+  }, [messages, rooms, seenMap, currentRoom?.id]);
+
+  useEffect(() => {
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-    const last = roomMsgs[roomMsgs.length - 1];
-    if (last) setSeen((s) => ({ ...s, [room]: last.id }));
-  }, [roomMsgs.length, room]);
+    const rMsgs = messages.filter((m) => m.room === currentRoom?.id && m.kind !== 'me');
+    const last = rMsgs[rMsgs.length - 1];
+    if (last && currentRoom?.id) {
+      setSeenMap((prev) => (prev[currentRoom.id] === last.id ? prev : { ...prev, [currentRoom.id]: last.id }));
+    }
+  }, [roomMsgs.length, currentRoom?.id, messages]);
 
-  const rooms = [
-    { id: 'ht', name: 'Clients', desc: 'Flux RFQ' },
-    { id: 'deal', name: 'Deal Room', desc: 'Desk' },
-    { id: 'ib', name: 'IB Room', desc: 'Wire' },
-  ];
+  const filteredRooms = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return rooms;
+    return rooms.filter(
+      (r) => r.name.toLowerCase().includes(term) || (r.team || '').toLowerCase().includes(term)
+    );
+  }, [rooms, search]);
 
   const submit = (e) => {
-    e.preventDefault();
-    if (!text.trim()) return;
-    send({ type: 'chat', room, text: text.trim() });
+    e?.preventDefault();
+    if (!text.trim() || !currentRoom) return;
+    send({ type: 'chat', room: currentRoom.id, text: text.trim() });
     setText('');
   };
 
   return (
-    <div className="panel area-chat">
-      <div className="panel-head">
-        <span className="panel-title">💬 Chat</span>
-        <div className="spacer" />
-        <span className="badge src mono" style={{ fontSize: 8 }}>EN LIGNE</span>
-      </div>
-      <div className="chat">
-        <div className="chat-body">
-          <div className="rooms">
-            {rooms.map((r) => (
-              <div key={r.id} className={cls('room', room === r.id && 'active')} onClick={() => setRoom(r.id)}>
-                <div style={{ minWidth: 0 }}>
-                  <div className="room-name">{r.name}</div>
-                  <div className="room-name" style={{ fontSize: 8, opacity: 0.6 }}>{r.desc}</div>
-                </div>
-                {unread[r.id] > 0 && room !== r.id && <span className="room-unread">{Math.min(9, unread[r.id])}</span>}
-              </div>
-            ))}
+    <section className="amp-panel area-chat">
+      <div className="amp-chat-split">
+        {/* Left column: Search + NAME | TEAM directory (matches image-1.png) */}
+        <div className="amp-chat-dir">
+          <div className="amp-dir-search">
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search name or team"
+            />
+            <span className="search-ico" aria-hidden="true">🔍</span>
           </div>
-          <div className="msgs" ref={listRef}>
-            {roomMsgs.map((m) => (
-              <div key={m.id} className={cls('msg', m.kind)}>
-                <span className="who">{m.from}</span>
-                <span className="txt">{m.text}</span>
+
+          <div className="amp-dir-head">
+            <span>NAME</span>
+            <span>TEAM</span>
+          </div>
+
+          <div className="amp-dir-list">
+            {filteredRooms.map((r) => (
+              <div
+                key={r.id}
+                className={cls('amp-dir-row', currentRoom?.id === r.id && 'active')}
+                onClick={() => {
+                  onSelectRoom?.(r.id);
+                  if (r.openRfq && onPrefillQuote) {
+                    onPrefillQuote(r.openRfq.ticker, r.openRfq.qty, r.id);
+                  }
+                }}
+              >
+                <span className="dir-name">
+                  {r.hasOpenRfq && <i className="rfq-live-dot" title="Active trade inquiry!" />}
+                  {r.name}
+                </span>
+                <span className="dir-team">
+                  {r.team}
+                  {unread[r.id] > 0 && <b className="dir-badge">{Math.min(9, unread[r.id])}</b>}
+                </span>
               </div>
             ))}
-            {!roomMsgs.length && <div className="empty">Pas de message</div>}
           </div>
         </div>
-        <form className="chat-input" onSubmit={submit}>
-          <input
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder="Écrire au desk…"
-            maxLength={200}
-            style={{ fontSize: 11, padding: '4px 7px' }}
-          />
-          <button className="btn tiny" type="submit" style={{ padding: '4px 9px' }}>↵</button>
-        </form>
+
+        {/* Right column: Selected room header + messages + Input + SEND MESSAGE */}
+        <div className="amp-chat-conv">
+          <div className="amp-conv-head">
+            <div className="conv-avatar" aria-hidden="true">👤</div>
+            <div style={{ minWidth: 0 }}>
+              <div className="conv-title">{currentRoom?.headerTitle || currentRoom?.name}</div>
+              <div className="conv-sub">{currentRoom?.subTitle || 'SINGLE'}</div>
+            </div>
+            {currentRoom?.openRfq && (
+              <button
+                type="button"
+                className="amp-rfq-pill"
+                onClick={() => onPrefillQuote?.(currentRoom.openRfq.ticker, currentRoom.openRfq.qty, currentRoom.id)}
+                title="Click to load ticker & volume into Quote Ticket"
+              >
+                RFQ: {shares(currentRoom.openRfq.qty)} {currentRoom.openRfq.ticker} →
+              </button>
+            )}
+          </div>
+
+          <div className="amp-conv-msgs" ref={listRef}>
+            {roomMsgs.map((m) => (
+              <div key={m.id} className={cls('amp-msg', m.kind)}>
+                <span className="msg-ts">[{m.clock}]</span>{' '}
+                <span className="msg-from">{m.from}:</span>{' '}
+                <span className="msg-txt">{m.text}</span>
+              </div>
+            ))}
+            {!roomMsgs.length && (
+              <div className="amp-empty" style={{ padding: 14 }}>
+                {state?.role === 'IB' && currentRoom?.team
+                  ? `Proactive Sales Tip: Say "hi, seen the news in BP? need a price?" to solicit client flow!`
+                  : 'No messages yet in this room.'}
+              </div>
+            )}
+          </div>
+
+          <form className="amp-conv-form" onSubmit={submit}>
+            <textarea
+              rows={2}
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  submit(e);
+                }
+              }}
+              placeholder={
+                state?.role === 'IB'
+                  ? 'Input your message or @quote (e.g. @quote BP 54 56 50000)'
+                  : 'Message dealer or @rfq (e.g. @rfq BP 50000)'
+              }
+            />
+            <button type="submit" className="amp-blue-btn">
+              SEND MESSAGE
+            </button>
+          </form>
+        </div>
       </div>
-    </div>
+    </section>
   );
 }
