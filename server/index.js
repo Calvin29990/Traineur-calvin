@@ -5,6 +5,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { Session, BALANCE } from './engine.js';
+import { PACES, GAUGE_DEFS, INSTRUMENTS, ROLE_BADGES } from './content.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -19,23 +20,48 @@ if (fs.existsSync(dist)) {
     index: 'index.html',
     maxAge: '1h',
     setHeaders: (res, filePath) => {
-      if (filePath.endsWith('index.html')) res.setHeader('Cache-Control', 'no-cache');
+      if (filePath.endsWith('index.html') || filePath.endsWith('.pdf')) {
+        res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
+      }
     },
   }));
 }
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, sessions: sessions.size, balance: BALANCE }));
+app.get('/api/health', (_req, res) => res.json({
+  ok: true,
+  version: '3.0.0',
+  sessions: sessions.size,
+  balance: BALANCE,
+  universe: INSTRUMENTS.map((i) => i.ticker),
+  paces: PACES,
+  roles: ROLE_BADGES,
+}));
+
+app.get('/api/gauges', (_req, res) => res.json(GAUGE_DEFS));
 
 app.get('/api/leaderboard-sample', (_req, res) => {
   const s = new Session({ id: 'sample', seed: 1234 });
-  s.round = s.roundsTotal;
+  s.round = 2;
+  s.roundHistory = [{ pnl: 900000, scoreObj: { total: 88 } }, { pnl: 700000, scoreObj: { total: 91 } }];
   s.phase = 'done';
   res.json(s.leaderboard());
 });
 
+// Guide PDF (built by scripts/make-guide.mjs into public/) — served from dist in prod
+app.get('/guide-amplifyme-top1.pdf', (_req, res) => {
+  const candidates = [
+    path.join(dist, 'guide-amplifyme-top1.pdf'),
+    path.join(ROOT, 'public', 'guide-amplifyme-top1.pdf'),
+  ];
+  const found = candidates.find((p) => fs.existsSync(p));
+  if (!found) return res.status(404).send('Guide PDF not built yet — run npm run make:guide');
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', 'inline; filename="guide-amplifyme-top1.pdf"');
+  return res.sendFile(found);
+});
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
-
 const sessions = new Map();
 let seq = 0;
 
@@ -46,10 +72,11 @@ function newSession(nickname, opts = {}) {
     seed: opts.seed,
     rounds: opts.rounds,
     roundSeconds: opts.roundSeconds,
-    mode: opts.mode || 'challenge',
-    startRole: opts.startRole || 'IB',
+    pace: opts.pace,
+    mode: opts.mode === 'dynamic' ? 'dynamic' : 'replay',
+    startRole: opts.startRole === 'AM' ? 'AM' : 'IB',
     assistMode: Boolean(opts.assistMode),
-    nickname: nickname || 'calvin',
+    nickname: nickname || 'Calvin MINANG',
   });
   sessions.set(id, { s, sockets: new Set(), lastSent: 0, lastAction: Date.now() });
   return sessions.get(id);
@@ -60,36 +87,47 @@ setInterval(() => {
   const now = Date.now();
   for (const [id, entry] of sessions) {
     const { s } = entry;
-    if (!s.paused && entry.sockets.size > 0) s.step((TICK / 1000) * s.speed);
+    if (!s.paused && entry.sockets.size > 0 && s.phase === 'round') {
+      s.step((TICK / 1000) * s.speed);
+    }
     if (now - entry.lastSent > 240) {
       entry.lastSent = now;
-      const payload = JSON.stringify({ type: 'state', data: s.snapshot() });
+      let payload;
+      try { payload = JSON.stringify({ type: 'state', data: s.snapshot() }); } catch { continue; }
       for (const ws of entry.sockets) {
         if (ws.readyState === 1) {
           try { ws.send(payload); } catch { /* ignore */ }
         }
       }
     }
-    if (now - entry.lastAction > 3 * 3600 * 1000) {
+    if (now - entry.lastAction > 4 * 3600 * 1000) {
       for (const ws of entry.sockets) { try { ws.close(); } catch { /* ignore */ } }
       sessions.delete(id);
     }
   }
 }, TICK);
 
-function broadcastToast(entry, message, kind = 'err') {
-  const payload = JSON.stringify({ type: kind === 'err' ? 'error' : 'info', message });
+function send(entry, payload) {
+  const raw = JSON.stringify(payload);
   for (const ws of entry.sockets) {
     if (ws.readyState === 1) {
-      try { ws.send(payload); } catch { /* ignore */ }
+      try { ws.send(raw); } catch { /* ignore */ }
     }
   }
+}
+
+function toast(entry, message, kind = 'err') {
+  send(entry, { type: kind === 'err' ? 'error' : 'info', message });
+}
+
+function handleResult(entry, r) {
+  if (r?.error) toast(entry, r.error, 'err');
 }
 
 wss.on('connection', (ws) => {
   let entry = null;
 
-  ws.send(JSON.stringify({ type: 'hello', balance: BALANCE }));
+  ws.send(JSON.stringify({ type: 'hello', balance: BALANCE, paces: PACES }));
 
   ws.on('message', (raw) => {
     let msg;
@@ -100,14 +138,7 @@ wss.on('connection', (ws) => {
       if (msg.sessionId && sessions.has(msg.sessionId)) {
         entry = sessions.get(msg.sessionId);
       } else {
-        entry = newSession(msg.nickname, {
-          rounds: msg.rounds,
-          roundSeconds: msg.roundSeconds,
-          seed: msg.seed,
-          mode: msg.mode,
-          startRole: msg.startRole,
-          assistMode: msg.assistMode,
-        });
+        entry = newSession(msg.nickname, msg);
       }
       entry.sockets.add(ws);
       entry.lastAction = Date.now();
@@ -122,22 +153,29 @@ wss.on('connection', (ws) => {
 
     switch (type) {
       case 'start': {
-        if (s.phase === 'briefing') {
-          if (msg.nickname) s.nickname = String(msg.nickname).slice(0, 22);
-          if (msg.mode && ['challenge', 'ib', 'am'].includes(msg.mode)) s.mode = msg.mode;
-          if (msg.startRole && ['IB', 'AM'].includes(msg.startRole)) s.startRole = msg.startRole;
-          if (typeof msg.assistMode === 'boolean') s.assistMode = msg.assistMode;
-          if (msg.rounds) s.roundsTotal = Math.max(1, Math.min(6, Number(msg.rounds)));
-          if (msg.roundSeconds) s.roundSeconds = Math.max(90, Math.min(1800, Number(msg.roundSeconds)));
-          s.botPool = s.buildBotPool();
-          s.beginRound();
+        if (s.phase !== 'briefing') break;
+        if (msg.nickname) s.nickname = String(msg.nickname).slice(0, 24);
+        s.mode = msg.mode === 'dynamic' ? 'dynamic' : 'replay';
+        s.startRole = msg.startRole === 'AM' ? 'AM' : 'IB';
+        if (typeof msg.assistMode === 'boolean') s.assistMode = msg.assistMode;
+        if (msg.rounds) s.roundsTotal = Math.max(1, Math.min(4, Number(msg.rounds)));
+        if (msg.pace && PACES[msg.pace]) {
+          s.pace = msg.pace;
+          s.roundSeconds = PACES[msg.pace].seconds;
+        } else if (msg.roundSeconds) {
+          s.roundSeconds = Math.max(120, Math.min(2400, Number(msg.roundSeconds)));
+          s.pace = null;
         }
+        s.clockScale = (4 * 3600) / s.roundSeconds;
+        s.beginRound();
         break;
       }
       case 'nextRound': {
         if (s.phase === 'break') {
           s.debrief = { ...s.debrief, open: false };
           s.beginRound();
+        } else if (s.phase === 'done') {
+          s.debrief = s.debrief ? { ...s.debrief, open: false } : null;
         } else if (s.phase === 'round' && msg.force) {
           s.simTime = s.roundSeconds;
         }
@@ -147,9 +185,10 @@ wss.on('connection', (ws) => {
         s.debrief = s.debrief ? { ...s.debrief, open: false } : null;
         break;
       case 'restart': {
-        const ns = newSession(s.nickname, {
+        const ns = newSession(msg.nickname ?? s.nickname, {
           rounds: msg.rounds ?? s.roundsTotal,
           roundSeconds: msg.roundSeconds ?? s.roundSeconds,
+          pace: msg.pace ?? s.pace,
           mode: msg.mode ?? s.mode,
           startRole: msg.startRole ?? s.startRole,
           assistMode: msg.assistMode ?? s.assistMode,
@@ -161,8 +200,8 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'state', data: entry.s.snapshot() }));
         break;
       }
-      case 'sendQuote': {
-        const r = s.sendQuote({
+      case 'sendQuote':
+        handleResult(entry, s.sendQuote({
           clientRoom: msg.clientRoom,
           ticker: msg.ticker,
           bid: msg.bid,
@@ -170,69 +209,54 @@ wss.on('connection', (ws) => {
           bidVol: msg.bidVol,
           offerVol: msg.offerVol,
           validFor: msg.validFor,
-          rfqId: msg.rfqId,
-        });
-        if (r.error) broadcastToast(entry, r.error, 'err');
+        }));
         break;
-      }
-      case 'cancelQuote': {
-        const r = s.cancelQuote(msg.quoteId);
-        if (r.error) broadcastToast(entry, r.error, 'err');
+      case 'cancelQuote':
+        handleResult(entry, s.cancelQuote(msg.quoteId));
         break;
-      }
-      case 'requestQuote': {
-        const r = s.requestQuote({
+      case 'requestQuote':
+        handleResult(entry, s.requestQuote({
           dealerRoom: msg.dealerRoom,
           ticker: msg.ticker,
           qty: msg.qty,
-        });
-        if (r.error) broadcastToast(entry, r.error, 'err');
+          silent: Boolean(msg.silent),
+        }));
         break;
-      }
-      case 'acceptQuote': {
-        const r = s.acceptDealerQuote({
+      case 'acceptQuote':
+        handleResult(entry, s.acceptDealerQuote({
           quoteId: msg.quoteId,
           side: msg.side,
           qty: msg.qty,
-        });
-        if (r.error) broadcastToast(entry, r.error, 'err');
+        }));
         break;
-      }
-      case 'quote': {
-        const r = s.quoteRfq(msg.rfqId, msg.bid, msg.offer, msg.bidVol, msg.offerVol, msg.ttl);
-        if (r.error) broadcastToast(entry, r.error, 'err');
+      case 'trade':
+        handleResult(entry, s.tradeExchange(msg.ticker, msg.side, msg.qty));
         break;
-      }
-      case 'pass': {
-        const r = s.passRfq(msg.rfqId);
-        if (r.error) broadcastToast(entry, r.error, 'err');
+      case 'hedge':
+        handleResult(entry, s.hedge(msg.ticker));
         break;
-      }
-      case 'trade': {
-        const r = s.tradeExchange(msg.ticker, msg.side, msg.qty);
-        if (r.error) broadcastToast(entry, r.error, 'err');
-        break;
-      }
-      case 'hedge': {
-        const r = s.hedge(msg.ticker);
-        if (r.error) broadcastToast(entry, r.error, 'err');
-        break;
-      }
-      case 'flatten': {
+      case 'flatten':
         for (const t of Object.keys(s.positions)) {
           if (s.positions[t].qty !== 0) {
             s.hedgeCooldown = 0;
             const qty = Math.abs(s.positions[t].qty);
-            s.tradeExchange(t, s.positions[t].qty > 0 ? 'SELL' : 'BUY', qty);
+            handleResult(entry, s.tradeExchange(t, s.positions[t].qty > 0 ? 'SELL' : 'BUY', qty));
           }
         }
         break;
-      }
-      case 'chat': {
-        const r = s.chat(msg.room || 'deal', msg.text);
-        if (r?.error) broadcastToast(entry, r.error, 'err');
+      case 'chat':
+        handleResult(entry, s.chat(msg.room || (s.role === 'AM' ? 'am' : 'ib'), msg.text));
+        break;
+      case 'readRoom': {
+        if (s.role === 'IB') {
+          const c = s.clients.find((x) => x.id === msg.room);
+          if (c) c.unread = 0;
+        }
         break;
       }
+      case 'depth':
+        s.lastDepth = s.depthQuote(msg.ticker, msg.qty);
+        break;
       case 'chart':
         s.setChartTicker(msg.ticker);
         break;

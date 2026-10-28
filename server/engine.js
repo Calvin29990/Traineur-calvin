@@ -1,42 +1,75 @@
 // ---------------------------------------------------------------------------
-// Authoritative Simulation Engine — CFA Institute x AmplifyME Format
-// Roles: Sell-Side Investment Bank Trader (IB 1) & Buy-Side Asset Manager (AM 1)
+// Authoritative simulation engine — CFA Institute x AmplifyME Investing
+// Simulator Challenge format.
+//   Role 1: Investment Bank Market Maker (IB-55, sell-side, OTC chat quotes)
+//   Role 2: Asset Manager (AM-55, buy-side, $20,000,000 mandate)
+// Official Round 1 / Round 2 press releases replay + dynamic training mode.
 // ---------------------------------------------------------------------------
 
 import {
-  INSTRUMENTS, STOCK_NEWS, MACRO_NEWS, IB_CLIENT_ROOMS, AM_DEALER_ROOMS,
-  DEAL_ROOM_LINES, DESK_TRADERS, CLIENT_RFQ_TEMPLATES, BOT_NAMES, BOT_FIRMS,
+  INSTRUMENTS, TICKERS, PACES, ROLE_BADGES, ROLE_LABELS,
+  OFFICIAL_ROUND_1, OFFICIAL_ROUND_2, DYNAMIC_NEWS, ALL_NEWS,
+  IB_CLIENTS, AM_DEALERS, DESK_TRADERS, DEAL_ROOM_LINES,
+  CLIENT_MESSAGE_TEMPLATES, CLIENT_REPLIES, AM_ROOM_LINES, DEALER_CHATTER,
+  BOT_NAMES, BOT_FIRMS,
 } from './content.js';
 
 export const BALANCE = {
-  roundSeconds: 300,                 // 5 min default per round (configurable: 240 / 300 / 600)
-  rounds: 2,                         // Official 2-round rotation: Round 1 (IB 1) -> Round 2 (AM 1)
-  marketSecondsPerSimSecond: 9,      // Smooth market clock progression (e.g. 13:00 -> 13:45)
-  priceConvergence: 0.048,           // News target convergence (~20-40s realistic price discovery)
-  exchangeBaseHalfSpread: 0.0022,    // 22 bps base half-spread on Exchange for small 10k unwind clips
-  exchangeDepthSlope: 0.0175,        // +175 bps per 1x baseDepth shares (punishes 50k dumps, rewards IB quotes!)
-  exchangeImpactSlope: 0.0010,       // Market impact when hitting Exchange in size
-  ibClientCommRate: 0.0012,          // +12 bps positive commission earned by IB on client fills
-  ibExchangeFeeRate: 0.0002,         // 2 bps clearing fee paid by IB on Exchange unwinds
-  amIbCommRate: 0.0006,              // 6 bps commission paid by AM when executing via IB quote
-  amExchangeFeeRate: 0.0010,         // 10 bps fee paid by AM when executing directly on Exchange
-  ibMaxSingleNotional: 8000000,      // $8M single-stock inventory limit for IB
-  ibMaxGrossNotional: 20000000,      // $20M gross book limit for IB
-  amFundCapital: 20000000,           // $20,000,000 Asset Management Mandate
-  amMaxSingleNotional: 8000000,      // Max 40% ($8M) in a single stock for AM diversification
-  amMaxGrossNotional: 25000000,      // Max $25M gross exposure (1.25x) for AM
-  rfqIntervalMin: 7.5,
-  rfqIntervalMax: 13.0,
-  rfqExpiry: 50,
-  decisionDelayMin: 1.8,
-  decisionDelayMax: 4.2,
-  adverseHorizon: 12,
-  chatterMin: 14,
-  chatterMax: 28,
+  // Round pacing
+  defaultRoundSeconds: PACES.standard.seconds,
+  rounds: 2,
+  marketOpenSeconds: 4 * 3600,          // every round maps 13:00 -> 17:00
+
+  // Price discovery
+  priceConvergence: 0.040,              // per second pull towards news target
+  newsImpactScale: 0.28,                // qualitative wire -> calibrated % moves
+
+  // Exchange microstructure
+  ibExchangeHalfBps: 9,                 // IB crosses a tight public book
+  ibExchangeSlopeBps: 30,               // +30 bps per 1x baseDepth clip
+  amExchangeHalfBps: 35,                // AM Exchange is much wider than IB quotes
+  amExchangeSlopeBps: 58,
+  ibExchangeFeeBps: 2,
+  amExchangeFeeBps: 8,
+
+  // OTC economics
+  ibClientCommBps: 12,
+  amDealerCommBps: 3,
+  ibQuoteTargetHalfBps: 55,             // ideal sell-side half-spread around REFPRICE
+  ibQuoteWideHalfBps: 150,              // beyond this = uncompetitive
+  ibMaxSingleNotional: 12000000,
+  ibMaxGrossNotional: 24000000,
+
+  // AM mandate
+  amFundCapital: 20000000,
+  amMaxSingleNotional: 12000000,        // hard cap 60%; soft penalties above 20%
+  amMaxGrossNotional: 30000000,
+  amTargetMaxWeightPct: 20,
+  amTargetCashMinPct: 5,
+  amTargetCashMaxPct: 15,
+
+  // Client flow
+  rfqIntervalMin: 8,
+  rfqIntervalMax: 14,
+  rfqExpiry: 55,
+  decisionDelayMin: 1.6,
+  decisionDelayMax: 3.6,
+  chatterMin: 16,
+  chatterMax: 30,
+
+  // Scoring targets
+  ibCommissionTarget: 32000,
+  ibClientTradesTarget: 12,
+  ibClientNotionalTarget: 28000000,
+  ibPnlTarget: 220000,
+  amRoiTargetPct: 2.0,
+  amSlippageTargetBps: 18,
 };
 
 const r2 = (n) => Math.round(n * 100) / 100;
 const r3 = (n) => Math.round(n * 1000) / 1000;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const clamp01 = (v) => clamp(v, 0, 1);
 
 function mulberry32(a) {
   return function () {
@@ -50,7 +83,7 @@ function mulberry32(a) {
 function makeRng(seed) {
   const rnd = mulberry32(seed);
   const gauss = () => {
-    let u = 0, v = 0;
+    let u = 0; let v = 0;
     while (u === 0) u = rnd();
     while (v === 0) v = rnd();
     return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
@@ -65,10 +98,8 @@ function makeRng(seed) {
   };
 }
 
-export function fmtClock(simSec) {
-  // Starts at 13:00:00 (with pre-history from 12:45:00) matching AmplifyME screenshot
-  const start = 13 * 3600;
-  const t = Math.max(0, start + simSec * BALANCE.marketSecondsPerSimSecond);
+export function fmtClock(simSec, scale = 16) {
+  const t = Math.max(0, 13 * 3600 + simSec * scale);
   const h = Math.floor(t / 3600) % 24;
   const m = Math.floor((t % 3600) / 60);
   const s = Math.floor(t % 60);
@@ -77,25 +108,33 @@ export function fmtClock(simSec) {
 
 let seqId = 0;
 const uid = (p) => `${p}${++seqId}`;
+let eventSeq = 0;
+
+const PRICE_DEC = (inst) => (inst.dp === 3 ? r3 : r2);
+const priceStr = (v, dp) => (dp === 3 ? r3(v) : r2(v));
 
 export class Session {
   constructor({
     id, seed, rounds, roundSeconds, nickname,
-    mode = 'challenge', startRole = 'IB', assistMode = false,
+    mode = 'replay', startRole = 'IB', assistMode = false, pace = 'standard',
   }) {
     this.id = id || uid('s');
     this.seed = seed ?? Math.floor(Math.random() * 1e9);
     this.rng = makeRng(this.seed);
-    this.mode = ['challenge', 'ib', 'am'].includes(mode) ? mode : 'challenge';
+    this.mode = mode === 'dynamic' ? 'dynamic' : 'replay';
     this.startRole = startRole === 'AM' ? 'AM' : 'IB';
     this.assistMode = Boolean(assistMode);
-    this.roundsTotal = rounds ?? (this.mode === 'challenge' ? 2 : 2);
-    this.roundSeconds = roundSeconds ?? BALANCE.roundSeconds;
-    this.nickname = nickname || 'calvin';
+    this.roundsTotal = clamp(Number(rounds) || 2, 1, 4);
+    this.pace = PACES[pace] ? pace : null;
+    this.roundSeconds = clamp(
+      Number(roundSeconds) || (this.pace ? PACES[this.pace].seconds : BALANCE.defaultRoundSeconds),
+      120, 2400,
+    );
+    this.clockScale = BALANCE.marketOpenSeconds / this.roundSeconds;
+    this.nickname = nickname || 'Calvin MINANG';
 
-    this.phase = 'briefing'; // briefing | round | break | done
+    this.phase = 'briefing';
     this.round = 0;
-    this.role = this.roleForRound(1); // 'IB' | 'AM'
     this.speed = 1;
     this.paused = false;
     this.simTime = 0;
@@ -104,81 +143,128 @@ export class Session {
     this.breakTime = 0;
     this.oneMinWarned = false;
 
-    this.chartTicker = 'BP';
-    this.watchedTickers = ['BP', 'MSFT'];
-    this.usedStockNews = new Set();
-    this.usedMacroNews = new Set();
+    this.chartTicker = 'MSFT';
+    this.watchedTickers = ['MSFT', 'BP'];
+    this.usedNews = new Set();
 
-    // Round-level financial state
-    this.realized = 0;
-    this.ibCommissionEarned = 0;
-    this.exchangeFeesPaid = 0;
-    this.amCommPaid = 0;
-    this.positions = {};
-    this.candles = {};
-    this.news = [];
-    this.messages = [];
-    this.blotter = [];
-    this.liveQuotes = [];
-    this.oldQuotes = [];
-    this.clientRequests = []; // Inbound client RFQs in IB mode
-    this.pendingDealerQuotes = []; // Pending IB dealer replies in AM mode
-    this.pendingClientReplies = []; // Pending proactive sales replies in IB mode
-    this.flow = {};
-    this.hedgeCooldown = 0;
-
-    // Cumulative multi-round tracking
     this.roundHistory = [];
     this.roundStats = null;
     this.debrief = null;
     this.final = null;
+    this.events = [];
+    this.lastEventId = 0;
 
+    this.hedgeCooldown = 0;
     this.initMetrics();
     this.initMarket(true);
     this.botPool = this.buildBotPool();
-
     this.pendingNews = [];
     this.nextRfqAt = 0;
-    this.nextChatterAt = this.rng.range(6, 12);
+    this.nextChatterAt = 0;
+    this.pendingClientReplies = [];
+    this.pendingDealerQuotes = [];
+    this.clientRequests = [];
+    this.liveQuotes = [];
+    this.oldQuotes = [];
+    this.messages = [];
+    this.news = [];
+    this.blotter = [];
 
-    this.say('system', 'ib', `AmplifyME FlowTrader Engine ready — Mode: ${this.mode.toUpperCase()} (${this.roundsTotal} rounds).`, 'SYSTEM');
+    this.say('system', 'ib', 'AmplifyME FlowTrader engine ready — CFA Institute Investing Simulator.', 'SYSTEM');
   }
 
+  // ------------------------------------------------------------------ Setup
   roleForRound(r) {
-    if (this.mode === 'ib') return 'IB';
-    if (this.mode === 'am') return 'AM';
     const first = this.startRole || 'IB';
     const second = first === 'IB' ? 'AM' : 'IB';
     return r % 2 === 1 ? first : second;
+  }
+
+  get role() {
+    return this._role || this.roleForRound(Math.max(1, this.round));
+  }
+
+  set role(v) {
+    this._role = v;
   }
 
   initMetrics() {
     this.metrics = {
       quotesSent: 0,
       quotesCancelled: 0,
-      fills: 0,
-      rfqFills: 0,
-      exchangeTrades: 0,
-      spreadCapture: 0,
-      adverse: 0,
       staleSniped: 0,
-      markoutsPending: [],
-      maxAbsNotional: 0,
-      passes: 0,
-      rejects: 0,
+      quoteSpreadSum: 0,
+      quoteSpreadCount: 0,
+      quoteQualitySum: 0,
+      wideQuotes: 0,
+      razorQuotes: 0,
+      clientFills: 0,
+      clientVolume: 0,
+      clientNotional: 0,
+      ibCommission: 0,
+      exchangeFees: 0,
+      exchangeTrades: 0,
+      exchangeNotional: 0,
       fatFingers: 0,
-      proactiveSales: 0,
-      proactiveConversions: 0,
-      volumeQuoted: 0,
-      volumeTraded: 0,
-      clipsUnwoundWell: 0,
-      oversizedExchangeDumps: 0,
-      amIbBlocks: 0,
-      amExchangeBlocks: 0,
-      maxDiversifiedCount: 0,
+      clipsGood: 0,
+      dumps: 0,
+      netSamples: 0,
+      netOverSamples: 0,
+      netPeak: 0,
+      grossPeak: 0,
+      netAlerted: false,
+      cashAlerted: false,
+      concentrationAlerted: false,
+      amDealerTrades: 0,
+      amDealerNotional: 0,
+      amExchangeTrades: 0,
+      amExchangeNotional: 0,
+      execCostSum: 0,
+      execNotionalSum: 0,
+      alignedNotional: 0,
+      totalTradedNotional: 0,
+      amTrades: 0,
+      cashMin: BALANCE.amFundCapital,
+      maxWeight: 0,
+      diversified: 0,
       peakPnl: 0,
       maxDrawdown: 0,
+      markouts: [],
+      adverse: 0,
+      spreadCapture: 0,
+      proactiveReplies: 0,
+      proactiveConversions: 0,
+      tradeSeq: 0,
     };
+  }
+
+  resetRoundState() {
+    this.realized = 0;
+    this.ibCommissionEarned = 0;
+    this.exchangeFeesPaid = 0;
+    this.amCommPaid = 0;
+    this.cash = BALANCE.amFundCapital;
+    this.blotter = [];
+    this.liveQuotes = [];
+    this.oldQuotes = [];
+    this.clientRequests = [];
+    this.pendingDealerQuotes = [];
+    this.pendingClientReplies = [];
+    this.messages = [];
+    this.news = [];
+    this.positions = {};
+    this.candles = {};
+    this.chartTicker = 'MSFT';
+    this.netAlerted = false;
+    this.oneMinWarned = false;
+    this.equityCurve = [];
+    this.lastSampleAt = 0;
+    this.nextRfqAt = this.rng.range(2.5, 4.5);
+    this.nextChatterAt = this.rng.range(7, 13);
+    this.lastDepth = null;
+    this.newsSignal = Object.fromEntries(TICKERS.map((t) => [t, 0]));
+    this.macroSignal = 0;
+    this.initMetrics();
   }
 
   initMarket(initial = false) {
@@ -188,254 +274,287 @@ export class Session {
     this.flow = {};
 
     for (const base of INSTRUMENTS) {
-      // Slight fresh jitter on round 2+ while preserving familiar price scale
-      const mult = initial ? 1 : this.rng.range(0.94, 1.06);
-      const openRef = base.ref >= 100 ? r2(base.ref * mult) : r2(base.ref * mult);
+      const jitter = initial || this.mode === 'replay' ? 1 : this.rng.range(0.985, 1.015);
+      const open = priceStr(base.ref * jitter, base.dp);
       this.inst[base.ticker] = {
         ...base,
-        ref: openRef,
-        open: openRef,
-        prevClose: openRef,
-        logV: Math.log(openRef),
-        logTarget: Math.log(openRef),
-        mid: openRef,
-        last: openRef,
-        bid: openRef * (1 - BALANCE.exchangeBaseHalfSpread),
-        offer: openRef * (1 + BALANCE.exchangeBaseHalfSpread),
-        chg: 0,
-        chgPct: 0,
+        open,
+        prevClose: open,
+        logV: Math.log(open),
+        logTarget: Math.log(open),
+        mid: open,
+        last: open,
         dir: 1,
+        high: open,
+        low: open,
       };
-      this.positions[base.ticker] = {
-        qty: 0,
-        avg: 0,
-        realisedPnl: 0,
-        traded: false,
-      };
+      this.positions[base.ticker] = { qty: 0, avg: 0, realisedPnl: 0, traded: false };
       this.candles[base.ticker] = [];
     }
 
-    // Pre-seed 100 buckets of historical pre-round price action (-100s .. 0s, i.e., 12:45 -> 13:00)
-    // so charts, candlesticks, and SMA(20) look rich and authentic right at round open!
-    for (const t of Object.keys(this.inst)) {
-      const i = this.inst[t];
-      let lv = Math.log(i.open * this.rng.range(0.985, 1.015));
-      const targetEnd = Math.log(i.open);
-      for (let step = -100; step <= 0; step++) {
-        const pull = (targetEnd - lv) * 0.06;
+    // Pre-seed ~80 historical candles (400s of tape) so charts look live at open.
+    for (const t of TICKERS) {
+      const inst = this.inst[t];
+      const dec = (v) => priceStr(v, inst.dp);
+      let lv = Math.log(inst.open * this.rng.range(0.994, 1.006));
+      const target = Math.log(inst.open);
+      for (let step = -80; step <= 0; step++) {
         const o = Math.exp(lv);
-        const c1 = Math.exp(lv + pull * 0.4 + i.vol * this.rng.gauss() * 0.7);
-        const c2 = Math.exp(lv + pull * 0.8 + i.vol * this.rng.gauss() * 0.7);
-        lv = lv + pull + i.vol * this.rng.gauss() * 0.65;
-        if (step === 0) lv = targetEnd;
-        const cl = Math.exp(lv);
+        const pull = (target - lv) * 0.08;
+        const c1 = Math.exp(lv + pull * 0.5 + inst.vol * this.rng.gauss() * 0.55);
+        const c2 = Math.exp(lv + pull + inst.vol * this.rng.gauss() * 0.55);
+        const cl = step === 0 ? inst.open : c2;
+        if (step === 0) lv = target; else lv = Math.log(c2);
         const hi = Math.max(o, c1, c2, cl);
         const lo = Math.min(o, c1, c2, cl);
-        const dec = i.ref >= 100 ? r2 : r3;
-        const vol = Math.round(18000 + this.rng.next() * 48000);
-        this.candles[t].push([step, dec(o), dec(hi), dec(lo), dec(cl), vol]);
+        const volume = Math.round(14000 + this.rng.next() * 52000);
+        this.candles[t].push([step * 5, dec(o), dec(hi), dec(lo), dec(cl), volume]);
       }
-      i.logV = Math.log(i.open);
-      i.logTarget = Math.log(i.open);
-      i.mid = i.open;
-      i.last = i.open;
+      inst.logV = Math.log(inst.open);
+      inst.logTarget = Math.log(inst.open);
+      inst.mid = inst.open;
+      inst.last = inst.open;
+      inst.high = inst.open;
+      inst.low = inst.open;
     }
 
-    // Counterparty stats for IB mode
-    this.clients = IB_CLIENT_ROOMS.map((c) => ({
-      ...c,
-      id: c.roomId,
-      name: c.traderCode,
-      trades: 0,
-      informedTrades: 0,
-      volume: 0,
-      lastOutreachAt: -999,
+    this.clients = IB_CLIENTS.map((c) => ({
+      ...c, trades: 0, volume: 0, lastOutreachAt: -999, unread: 0,
     }));
-
-    // Dealer stats for AM mode
-    this.dealers = AM_DEALER_ROOMS.map((d) => ({
-      ...d,
-      id: d.roomId,
-      name: d.traderCode,
-      trades: 0,
-    }));
+    this.dealers = AM_DEALERS.map((d) => ({ ...d, quotes: 0, fills: 0 }));
+    this.cash = BALANCE.amFundCapital;
   }
 
-  // ----------------------------------------------------------- Market Depth
+  // --------------------------------------------------------- Market mechanics
+  halfSpreadBps(qty, ticker) {
+    const inst = this.inst[ticker];
+    const fromIB = this.role === 'IB';
+    const base = fromIB ? BALANCE.ibExchangeHalfBps : BALANCE.amExchangeHalfBps;
+    const slope = fromIB ? BALANCE.ibExchangeSlopeBps : BALANCE.amExchangeSlopeBps;
+    const ratio = Math.max(0, Number(qty) || 0) / inst.baseDepth;
+    return base + slope * ratio;
+  }
+
   depthQuote(ticker, rawQty = 10000) {
-    const i = this.inst[ticker];
-    if (!i) return null;
-    const qty = Math.max(100, Math.round(Number(rawQty) || 10000));
-    const depthRatio = qty / i.baseDepth;
-    const halfSpread = Math.min(0.045, BALANCE.exchangeBaseHalfSpread + BALANCE.exchangeDepthSlope * depthRatio);
-    const dec = i.ref >= 100 ? r2 : r3;
-    const sellPrice = dec(i.mid * (1 - halfSpread));
-    const buyPrice = dec(i.mid * (1 + halfSpread));
-    const midNotional = qty * i.mid;
-    const feeRate = this.role === 'IB' ? BALANCE.ibExchangeFeeRate : BALANCE.amExchangeFeeRate;
-    const commission = Math.round(midNotional * feeRate);
+    const inst = this.inst[ticker];
+    if (!inst) return null;
+    const qty = Math.max(1, Math.round(Number(rawQty) || 10000));
+    const halfBps = this.halfSpreadBps(qty, ticker);
+    const dec = (v) => priceStr(v, inst.dp);
+    const mid = inst.mid;
+    const sellPrice = dec(mid * (1 - halfBps / 1e4));
+    const buyPrice = dec(mid * (1 + halfBps / 1e4));
+    const notional = Math.round(qty * mid);
+    const feeBps = this.role === 'IB' ? BALANCE.ibExchangeFeeBps : BALANCE.amExchangeFeeBps;
     return {
       ticker,
       qty,
-      mid: dec(i.mid),
-      halfSpreadBps: Math.round(halfSpread * 10000),
+      mid: dec(mid),
+      halfSpreadBps: Math.round(halfBps * 10) / 10,
       sellPrice,
       buyPrice,
-      notional: Math.round(midNotional),
-      commission,
+      notional,
+      commission: Math.round((notional * feeBps) / 1e4),
+      feeBps,
     };
   }
 
-  // --------------------------------------------------------------- P&L Math
-  roundCommissionDisplay() {
-    if (this.role === 'IB') {
-      // Positive net commission earned from facilitating client flow (exact AmplifyME IB formula)
-      return Math.round(this.ibCommissionEarned - this.exchangeFeesPaid);
-    }
-    // In AM role, commission is fees paid on trades
-    return Math.round(this.amCommPaid);
+  // --------------------------------------------------------------- P&L maths
+  commissionDisplay() {
+    return Math.round(this.role === 'IB'
+      ? this.ibCommissionEarned - this.exchangeFeesPaid
+      : this.amCommPaid);
   }
 
-  unrealised() {
+  unrealised(ticker = null) {
     let v = 0;
-    for (const t of Object.keys(this.positions)) {
+    const tks = ticker ? [ticker] : TICKERS;
+    for (const t of tks) {
       const p = this.positions[t];
-      if (p.qty !== 0) v += p.qty * (this.inst[t].mid - p.avg);
+      if (!p || p.qty === 0) continue;
+      v += p.qty * (this.inst[t].mid - p.avg);
     }
     return v;
   }
 
   roundTotalPnl() {
+    if (this.phase === 'briefing') return 0;
     const unr = this.unrealised();
     if (this.role === 'IB') {
-      return this.realized + unr + (this.ibCommissionEarned - this.exchangeFeesPaid);
+      return this.realized + unr + this.ibCommissionEarned - this.exchangeFeesPaid;
     }
     return this.realized + unr - this.amCommPaid;
   }
 
-  totalPnl() {
-    const past = this.roundHistory.reduce((acc, r) => acc + r.pnl, 0);
-    if (this.phase === 'break' || this.phase === 'done') return past;
-    return past + this.roundTotalPnl();
+  portfolioValue() {
+    return this.cash + TICKERS.reduce((acc, t) => acc + this.positions[t].qty * this.inst[t].mid, 0);
   }
 
   grossNotional() {
-    let v = 0;
-    for (const t of Object.keys(this.positions)) {
-      v += Math.abs(this.positions[t].qty * this.inst[t].mid);
-    }
-    return v;
+    return TICKERS.reduce((acc, t) => acc + Math.abs(this.positions[t].qty * this.inst[t].mid), 0);
   }
 
   netNotional() {
-    let v = 0;
-    for (const t of Object.keys(this.positions)) {
-      v += this.positions[t].qty * this.inst[t].mid;
-    }
-    return v;
+    return TICKERS.reduce((acc, t) => acc + this.positions[t].qty * this.inst[t].mid, 0);
   }
 
-  // ----------------------------------------------------- Multi-Metric Score
+  sharesOwned() {
+    return TICKERS.reduce((acc, t) => acc + this.positions[t].qty, 0);
+  }
+
+  maxPositionWeightPct() {
+    const pv = Math.max(1, this.portfolioValue());
+    let max = 0;
+    for (const t of TICKERS) {
+      const w = Math.abs(this.positions[t].qty * this.inst[t].mid) / pv * 100;
+      if (w > max) max = w;
+    }
+    return max;
+  }
+
+  diversifiedCount() {
+    const pv = Math.max(1, this.portfolioValue());
+    return TICKERS.filter((t) => (Math.abs(this.positions[t].qty * this.inst[t].mid) / pv) >= 0.03).length;
+  }
+
+  totalPnl() {
+    const past = this.roundHistory.reduce((a, r) => a + r.pnl, 0);
+    if (this.phase === 'round') return past + this.roundTotalPnl();
+    return past;
+  }
+
+  // ---------------------------------------------------------------- Scoring
+  scoreSpreadQuote(halfBps) {
+    // 100 = ideal 15..110 bps around REFPRICE. Too wide is heavily penalised,
+    // razor-thin quotes are risky (adverse selection) and capped at 55.
+    if (!Number.isFinite(halfBps) || halfBps <= 0) return 0;
+    if (halfBps < 8) return 45;
+    if (halfBps < 15) return 70;
+    if (halfBps <= 110) return 100;
+    if (halfBps <= 160) return 100 - (halfBps - 110) * 1.1;
+    if (halfBps <= 260) return 45 - (halfBps - 160) * 0.35;
+    return Math.max(0, 10 - (halfBps - 260) * 0.2);
+  }
+
   computeRoleScore() {
     const m = this.metrics;
     const pnl = this.roundTotalPnl();
-
     if (this.role === 'IB') {
-      // 1. P&L + Commission Generation (0..40 pts) — target ~$90k+ for full marks
-      const pnlPts = Math.max(0, Math.min(40, ((pnl + 25000) / 125000) * 40));
-      // 2. Client Flow & Commission Activity (0..25 pts) — target 8+ client trades & proactive outreach
-      const commPts = Math.min(17, (this.ibCommissionEarned / 24000) * 17);
-      const salesPts = Math.min(8, m.rfqFills * 1.1 + m.proactiveConversions * 2.0);
-      const flowPts = Math.min(25, commPts + salesPts);
-      // 3. Risk Management & Inventory Unwinding (0..20 pts)
-      const maxLim = BALANCE.ibMaxGrossNotional;
-      const riskRatio = m.maxAbsNotional / maxLim;
-      let riskPts = 16;
-      if (riskRatio > 0.85) riskPts -= 5;
-      if (m.staleSniped > 0) riskPts -= Math.min(8, m.staleSniped * 3);
-      if (m.oversizedExchangeDumps > 0) riskPts -= Math.min(6, m.oversizedExchangeDumps * 2);
-      riskPts += Math.min(4, m.clipsUnwoundWell * 0.8);
-      riskPts = Math.max(0, Math.min(20, riskPts));
-      // 4. Operational Accuracy / Fat Finger Count (0..15 pts)
-      const ffcPts = Math.max(0, 15 - m.fatFingers * 5);
+      const comm = Math.max(0, this.ibCommissionEarned);
+      const commScore = clamp01(comm / BALANCE.ibCommissionTarget) * 100;
+      const ffcScore = clamp(100 - m.fatFingers * 25, 0, 100);
+      const ctFills = clamp01(m.clientFills / BALANCE.ibClientTradesTarget) * 100;
+      const ctVolume = clamp01(m.clientNotional / BALANCE.ibClientNotionalTarget) * 100;
+      const ctScore = clamp(0.55 * ctFills + 0.45 * ctVolume, 0, 100);
+      const avgSpread = m.quoteSpreadCount ? m.quoteSpreadSum / m.quoteSpreadCount : 0;
+      const spreadBase = m.quoteSpreadCount ? (m.quoteQualitySum / m.quoteSpreadCount) * 100 : 0;
+      const ssrmScore = clamp(spreadBase - m.staleSniped * 14 - m.wideQuotes * 3.5, 0, 100);
+      const netRatio = Math.min(1, Math.abs(this.netNotional()) / 5000000);
+      const overShare = m.netSamples ? m.netOverSamples / m.netSamples : 0;
+      const struct = clamp(100 * (1 - Math.min(1, overShare * 1.35)), 0, 100);
+      const flat = clamp(100 * (1 - netRatio), 0, 100);
+      const clips = m.clipsGood === 0 && m.dumps === 0 ? 100 : clamp(m.clipsGood * 9, 0, 100);
+      const etmScore = clamp(0.48 * struct + 0.37 * flat + 0.15 * clips - m.dumps * 5, 0, 100);
+      const pnlScore = clamp(((pnl + 50000) / (BALANCE.ibPnlTarget + 50000)) * 100, 0, 100);
 
-      const total = Math.round(Math.max(5, Math.min(99, pnlPts + flowPts + riskPts + ffcPts)));
-      return {
-        role: 'IB',
-        total,
-        breakdown: [
-          { label: 'Trading & Spread P&L', score: Math.round((pnlPts / 40) * 100), weight: '40%' },
-          { label: 'Client Flow & Commissions', score: Math.round((flowPts / 25) * 100), weight: '25%' },
-          { label: 'Risk & Unwind Discipline', score: Math.round((riskPts / 20) * 100), weight: '20%' },
-          { label: 'Operational Accuracy (0 FFC)', score: Math.round((ffcPts / 15) * 100), weight: '15%' },
-        ],
-      };
+      const gauges = [
+        { code: 'COMM', label: 'Commission', score: Math.round(commScore), weight: 16, detail: `$${Math.round(comm).toLocaleString('en-US')} encaissés sur le flux client (cible $${BALANCE.ibCommissionTarget.toLocaleString('en-US')}).` },
+        { code: 'FFC', label: 'Fat Finger Count', score: Math.round(ffcScore), weight: 10, detail: m.fatFingers ? `${m.fatFingers} erreur(s) de saisie détectée(s).` : 'Zéro erreur de saisie — parfait.' },
+        { code: 'CT', label: 'Chat Trades', score: Math.round(ctScore), weight: 16, detail: `${m.clientFills} trade(s) client · $${Math.round(m.clientNotional).toLocaleString('en-US')} de notionnel OTC.` },
+        { code: 'SSRM', label: 'Sell-Side Risk Mgmt', score: Math.round(ssrmScore), weight: 16, detail: `Spread moyen ${avgSpread.toFixed(0)} bps autour du REFPRICE · ${m.staleSniped} quote(s) snipée(s) · ${m.wideQuotes} spread(s) trop large(s).` },
+        { code: 'ETM', label: 'Exchange Trade Metrics', score: Math.round(etmScore), weight: 17, detail: `Exposition nette finale $${Math.round(this.netNotional()).toLocaleString('en-US')} · ${Math.round(overShare * 100)}% du temps au-delà de $3M · ${m.dumps} dump(s) massif(s).` },
+        { code: 'PnL', label: 'Total P&L', score: Math.round(pnlScore), weight: 25, detail: `Realised + Unrealised = $${Math.round(pnl).toLocaleString('en-US')} (cible $${BALANCE.ibPnlTarget.toLocaleString('en-US')}).` },
+      ];
+      const total = Math.round(gauges.reduce((a, g) => a + g.score * g.weight, 0) / 100);
+      return { role: 'IB', total, gauges, pnl: Math.round(pnl), commission: Math.round(comm) };
     }
 
-    // AM Role ($20M Fund) Score:
-    const roiPct = (pnl / BALANCE.amFundCapital) * 100;
-    // 1. Portfolio Return / ROI (0..45 pts) — target +4% to +8% return on $20M ($800k - $1.6M)
-    const roiPts = Math.max(0, Math.min(45, ((roiPct + 1.0) / 6.5) * 45));
-    // 2. Diversification & Drawdown Control (0..25 pts)
-    let divPts = Math.min(15, m.maxDiversifiedCount * 4.2);
-    const ddPct = (m.maxDrawdown / BALANCE.amFundCapital) * 100;
-    const ddPts = Math.max(0, 10 - ddPct * 2.5);
-    const riskPts = Math.max(0, Math.min(25, divPts + ddPts));
-    // 3. Execution Quality: IB Quotes vs Exchange Impact (0..15 pts)
-    const totalBlocks = m.amIbBlocks + m.amExchangeBlocks;
-    const ibShare = totalBlocks > 0 ? m.amIbBlocks / totalBlocks : 0.5;
-    const execPts = totalBlocks === 0 ? 4 : Math.min(15, 6 + ibShare * 9 - m.oversizedExchangeDumps * 2);
-    // 4. Operational Accuracy / Fat Finger Count (0..15 pts)
-    const ffcPts = Math.max(0, 15 - m.fatFingers * 5);
+    // --- AM-55 -------------------------------------------------------------
+    const pv = Math.max(1, this.portfolioValue());
+    const pnlAm = this.roundTotalPnl();
+    const cashPct = (this.cash / pv) * 100;
+    const maxWeight = this.maxPositionWeightPct();
+    const diversified = this.diversifiedCount();
 
-    const total = Math.round(Math.max(5, Math.min(99, roiPts + Math.max(0, execPts) + riskPts + ffcPts)));
-    return {
-      role: 'AM',
-      total,
-      roiPct: r2(roiPct),
-      breakdown: [
-        { label: 'Portfolio Return (ROI %)', score: Math.round((roiPts / 45) * 100), weight: '45%' },
-        { label: 'Diversification & Risk Control', score: Math.round((riskPts / 25) * 100), weight: '25%' },
-        { label: 'Execution Quality (IB vs Exch)', score: Math.round((Math.max(0, execPts) / 15) * 100), weight: '15%' },
-        { label: 'Operational Accuracy (0 FFC)', score: Math.round((ffcPts / 15) * 100), weight: '15%' },
-      ],
-    };
+    let cashScore;
+    if (cashPct < BALANCE.amTargetCashMinPct) cashScore = clamp((cashPct / BALANCE.amTargetCashMinPct) * 100, 0, 100);
+    else if (cashPct <= BALANCE.amTargetCashMaxPct) cashScore = 100;
+    else cashScore = clamp(100 - (cashPct - BALANCE.amTargetCashMaxPct) * 2.6, 0, 100);
+
+    const weightScore = maxWeight <= BALANCE.amTargetMaxWeightPct
+      ? 100
+      : clamp(100 - (maxWeight - BALANCE.amTargetMaxWeightPct) * 3.3, 0, 100);
+    const divScore = clamp((diversified / 5) * 100, 0, 100);
+    const nTrades = m.amTrades;
+    let tradeScore;
+    if (nTrades === 0) tradeScore = 0;
+    else if (nTrades < 6) tradeScore = 45 + nTrades * 9;
+    else if (nTrades <= 36) tradeScore = 100;
+    else tradeScore = clamp(100 - (nTrades - 36) * 2.2, 0, 100);
+    const bsrmScore = clamp(0.35 * cashScore + 0.30 * weightScore + 0.20 * divScore + 0.15 * tradeScore, 0, 100);
+
+    const avgCost = m.execNotionalSum > 0 ? m.execCostSum / m.execNotionalSum : 999;
+    const costScore = m.execNotionalSum > 0 ? clamp(100 - Math.max(0, avgCost - BALANCE.amSlippageTargetBps) * 2.0, 0, 100) : 0;
+    const dealerShare = m.totalTradedNotional > 0 ? m.amDealerNotional / m.totalTradedNotional : 0.5;
+    const esScore = m.totalTradedNotional > 0 ? clamp(0.72 * costScore + 0.28 * dealerShare * 100, 0, 100) : 0;
+
+    const ffcScore = clamp(100 - m.fatFingers * 25, 0, 100);
+
+    const alignScore = m.totalTradedNotional > 0
+      ? clamp((m.alignedNotional / m.totalTradedNotional) * 100, 0, 100)
+      : 50;
+    const grossRatio = this.grossNotional() / pv;
+    let deployScore;
+    if (grossRatio < 0.55) deployScore = clamp((grossRatio / 0.55) * 100, 0, 100);
+    else if (grossRatio <= 1.1) deployScore = 100;
+    else deployScore = clamp(100 - (grossRatio - 1.1) * 220, 0, 100);
+    const raScore = clamp(0.62 * alignScore + 0.38 * deployScore, 0, 100);
+
+    const roiPct = (pnlAm / BALANCE.amFundCapital) * 100;
+    const roiScore = clamp(((roiPct + 1.0) / (BALANCE.amRoiTargetPct + 1.0)) * 100, 0, 100);
+
+    const gauges = [
+      { code: 'BSRM', label: 'Buy-Side Risk Mgmt', score: Math.round(bsrmScore), weight: 24, detail: `Cash ${cashPct.toFixed(1)}% · max ${maxWeight.toFixed(0)}% sur une ligne · ${diversified}/5 lignes ≥3% · ${nTrades} trades.` },
+      { code: 'ES', label: 'Execution Score', score: Math.round(esScore), weight: 18, detail: `Coût moyen vs REFPRICE ${m.execNotionalSum > 0 ? avgCost.toFixed(1) : '—'} bps · ${(dealerShare * 100).toFixed(0)}% exécuté via les banques.` },
+      { code: 'FFC', label: 'Fat Finger Count', score: Math.round(ffcScore), weight: 8, detail: m.fatFingers ? `${m.fatFingers} erreur(s) d'exécution / taille.` : 'Zéro erreur — exécution propre.' },
+      { code: 'RA', label: 'Risk Appetite', score: Math.round(raScore), weight: 20, detail: `Alignement news ${alignScore.toFixed(0)}% · exposition brute ${(grossRatio * 100).toFixed(0)}% du fonds.` },
+      { code: 'ROI', label: 'Return on Investment', score: Math.round(roiScore), weight: 30, detail: `Performance $${Math.round(pnlAm).toLocaleString('en-US')} = ${roiPct.toFixed(2)}% sur $20M (cible ${BALANCE.amRoiTargetPct.toFixed(1)}%).` },
+    ];
+    const total = Math.round(gauges.reduce((a, g) => a + g.score * g.weight, 0) / 100);
+    return { role: 'AM', total, gauges, pnl: Math.round(pnlAm), roiPct: r2(roiPct) };
   }
 
   overallChallengeScore() {
     const scores = this.roundHistory.map((r) => r.scoreObj?.total ?? 50);
     if (this.phase === 'round') scores.push(this.computeRoleScore().total);
-    if (!scores.length) return 50;
+    if (!scores.length) return 0;
     return Math.round(scores.reduce((a, b) => a + b, 0) / scores.length);
   }
 
-  // ------------------------------------------------------------ Leaderboard
+  // -------------------------------------------------------------- Leaderboard
   buildBotPool() {
     const pool = [];
-    const n = 259; // +1 player = 260 global university students in session
-    for (let i = 0; i < n; i++) {
-      let sk = 0.50 + this.rng.gauss() * 0.165;
-      sk = Math.max(0.08, Math.min(0.96, sk));
-      const rounds = [];
-      for (let r = 1; r <= 6; r++) {
-        const rRole = this.roleForRound(r);
-        if (rRole === 'IB') {
-          const pnl = Math.round((sk - 0.36) * 185000 + this.rng.gauss() * 28000);
-          const score = Math.round(Math.max(12, Math.min(97, sk * 92 + this.rng.gauss() * 6)));
-          rounds.push({ pnl, score });
-        } else {
-          // AM $20M round P&L scale
-          const pnl = Math.round((sk - 0.35) * 1450000 + this.rng.gauss() * 240000);
-          const score = Math.round(Math.max(12, Math.min(97, sk * 92 + this.rng.gauss() * 6)));
-          rounds.push({ pnl, score });
-        }
+    for (let i = 0; i < 259; i++) {
+      let skill = 0.48 + this.rng.gauss() * 0.17;
+      skill = clamp(skill, 0.08, 0.97);
+      const scores = [];
+      const pnls = [];
+      for (let r = 1; r <= 4; r++) {
+        const role = this.roleForRound(r);
+        const baseScore = clamp((0.30 + skill * 0.64) * 100 + this.rng.gauss() * 4.5, 12, 97);
+        const pnl = role === 'AM'
+          ? Math.round((skill - 0.38) * 1650000 + this.rng.gauss() * 190000)
+          : Math.round((skill - 0.36) * 300000 + this.rng.gauss() * 45000);
+        scores.push(Math.round(baseScore));
+        pnls.push(pnl);
       }
       pool.push({
         id: `b${i}`,
         name: BOT_NAMES[i % BOT_NAMES.length] + (i >= BOT_NAMES.length ? ` #${Math.floor(i / BOT_NAMES.length) + 1}` : ''),
         firm: BOT_FIRMS[Math.floor(this.rng.next() * BOT_FIRMS.length)],
-        skill: sk,
-        rounds,
+        skill,
+        scores,
+        pnls,
       });
     }
     return pool;
@@ -443,74 +562,85 @@ export class Session {
 
   leaderboard() {
     const progress = this.phase === 'round'
-      ? Math.max(0.05, Math.min(1, this.simTime / this.roundSeconds))
+      ? clamp(this.simTime / this.roundSeconds, 0.02, 1)
       : this.phase === 'briefing' ? 0 : 1;
-
     const myScore = this.overallChallengeScore();
     const myPnl = Math.round(this.totalPnl());
+    const completed = this.roundHistory.length;
+    const currentRound = this.phase === 'round' ? this.round : null;
 
     const rows = this.botPool.map((b) => {
+      let score = 0;
       let pnl = 0;
-      const scList = [];
-      const maxR = Math.max(1, this.round || 1);
-      for (let r = 0; r < maxR; r++) {
-        const br = b.rounds[r] || b.rounds[0];
-        if (r < (this.round - 1)) {
-          pnl += br.pnl;
-          scList.push(br.score);
-        } else if (this.phase !== 'briefing') {
-          pnl += br.pnl * progress;
-          scList.push(Math.round(50 + (br.score - 50) * progress));
+      let n = 0;
+      for (let r = 0; r < Math.max(1, this.round); r++) {
+        const base = b.scores[r] ?? b.scores[0];
+        const roundPnl = b.pnls[r] ?? b.pnls[0];
+        if (r < completed) {
+          score += base;
+          pnl += roundPnl;
+          n += 1;
+        } else if (currentRound && r === currentRound - 1) {
+          score += 50 + (base - 50) * progress;
+          pnl += (roundPnl * progress);
+          n += 1;
         }
       }
-      const score = scList.length ? Math.round(scList.reduce((a, c) => a + c, 0) / scList.length) : 50;
-      return { name: b.name, firm: b.firm, pnl: Math.round(pnl), score, me: false };
+      if (!n) { score = 50; pnl = 0; }
+      return {
+        name: b.name,
+        firm: b.firm,
+        score: Math.round(clamp(n ? score / n : 50, 5, 99)),
+        pnl: Math.round(pnl),
+        me: false,
+      };
     });
 
-    rows.push({
-      name: this.nickname,
-      firm: 'CFA Candidate (You)',
-      pnl: myPnl,
-      score: myScore,
-      me: true,
-    });
-
-    // CFA x AmplifyME ranks by Composite Assessment Score, breaking ties by Total P&L
+    rows.push({ name: this.nickname, firm: 'CFA Candidate (You)', score: myScore, pnl: myPnl, me: true });
     rows.sort((a, b) => (b.score - a.score) || (b.pnl - a.pnl));
     rows.forEach((r, idx) => { r.rank = idx + 1; });
 
     const idx = rows.findIndex((r) => r.me);
     const total = rows.length;
-    const rank = idx + 1;
-    const percentile = Math.max(0.1, Math.min(99.9, (1 - idx / (total - 1)) * 100));
-    const top10Idx = Math.max(0, Math.floor(total * 0.10) - 1);
-
+    const percentile = clamp((1 - idx / (total - 1)) * 100, 0.1, 99.9);
     return {
-      rows: rows.slice(0, 12),
+      rows: rows.slice(0, 14),
       around: rows.slice(Math.max(0, idx - 3), idx + 4),
-      rank,
+      rank: idx + 1,
       total,
       topPct: percentile,
-      myPnl,
       myScore,
-      firstThreshold: rows[top10Idx]?.pnl ?? 0,
-      scoreThreshold: rows[top10Idx]?.score ?? 78,
+      myPnl,
+      scoreThreshold: rows[Math.max(0, Math.floor(total * 0.01) - 1)]?.score ?? 90,
     };
   }
 
-  // -------------------------------------------------------------- Messaging
+  // ---------------------------------------------------------------- Messaging
   say(kind, room, text, from) {
-    const clock = fmtClock(this.totalSim);
-    this.messages.push({
+    const msg = {
       id: uid('m'),
-      at: this.totalSim,
-      clock,
+      at: Math.round(this.totalSim * 10) / 10,
+      clock: fmtClock(this.totalSim, this.clockScale),
       room,
       kind,
       from: from || (kind === 'desk' ? this.rng.pick(DESK_TRADERS) : 'SYSTEM'),
       text,
-    });
-    if (this.messages.length > 160) this.messages.shift();
+    };
+    this.messages.push(msg);
+    if (this.messages.length > 220) this.messages.shift();
+    return msg;
+  }
+
+  emitEvent(type, payload = {}) {
+    const ev = { id: ++eventSeq, type, at: Math.round(this.totalSim * 10) / 10, ...payload };
+    this.events.push(ev);
+    if (this.events.length > 45) this.events.shift();
+    this.lastEventId = ev.id;
+    return ev;
+  }
+
+  newsRoom() {
+    return this.role === 'IB' ? 'ib' : 'deal';
   }
 
   postNote(headline, detail = '') {
@@ -522,370 +652,345 @@ export class Session {
       ticker: 'NOTE',
       headline,
       detail: detail || headline,
-      time: fmtClock(this.totalSim),
+      time: fmtClock(this.totalSim, this.clockScale),
       impact: 0,
     });
-    if (this.news.length > 28) this.news.pop();
+    if (this.news.length > 40) this.news.pop();
   }
 
-  // -------------------------------------------------------------- Execution
-  applyFill(ticker, signedQty, price, commAmount, source, meta = {}) {
+  // ---------------------------------------------------------------- Execution
+  applyFill(ticker, signedQty, price, commission, source, meta = {}) {
     const pos = this.positions[ticker];
+    const inst = this.inst[ticker];
     const side = signedQty > 0 ? 'BUY' : 'SELL';
     const qty = Math.abs(signedQty);
     pos.traded = true;
 
-    // Average cost & per-security Realised P&L (FIFO/avg cost standard)
-    if (pos.qty !== 0 && Math.sign(pos.qty) !== Math.sign(signedQty)) {
-      const closed = Math.min(qty, Math.abs(pos.qty));
-      const pnlClosed = (price - pos.avg) * closed * Math.sign(pos.qty);
-      pos.realisedPnl += pnlClosed;
-      this.realized += pnlClosed;
-      if (qty > Math.abs(pos.qty)) {
-        pos.avg = price;
-      }
-    } else if (qty > 0) {
+    if (pos.qty === 0) {
+      pos.avg = price;
+      pos.qty = signedQty;
+    } else if (Math.sign(pos.qty) === Math.sign(signedQty)) {
       pos.avg = (pos.avg * Math.abs(pos.qty) + price * qty) / (Math.abs(pos.qty) + qty);
-    }
-
-    pos.qty += signedQty;
-    if (pos.qty === 0) pos.avg = 0;
-
-    // Commission accounting by Role & Venue
-    if (this.role === 'IB') {
-      if (source === 'CLIENT') {
-        this.ibCommissionEarned += commAmount;
-      } else {
-        this.exchangeFeesPaid += commAmount;
-      }
+      pos.qty += signedQty;
     } else {
-      this.amCommPaid += commAmount;
+      const closingQty = Math.min(qty, Math.abs(pos.qty));
+      const pnl = (price - pos.avg) * closingQty * Math.sign(pos.qty);
+      pos.realisedPnl += pnl;
+      this.realized += pnl;
+      const flipped = qty > Math.abs(pos.qty);
+      pos.qty += signedQty;
+      if (pos.qty === 0) pos.avg = 0;
+      else if (flipped) pos.avg = price;
     }
 
-    const mid = this.inst[ticker].mid;
-    const capture = (mid - price) * signedQty;
-    this.metrics.volumeTraded += qty;
-    this.metrics.fills += 1;
+    if (this.role === 'IB') {
+      if (source === 'CLIENT') this.ibCommissionEarned += commission;
+      else this.exchangeFeesPaid += commission;
+    } else {
+      this.amCommPaid += commission;
+      if (signedQty > 0) this.cash -= qty * price + commission;
+      else this.cash += qty * price - commission;
+    }
 
-    const dec = this.inst[ticker].ref >= 100 ? r2 : r3;
+    const capture = (inst.mid - price) * signedQty;
+    if (this.role === 'IB' && source === 'CLIENT') this.metrics.spreadCapture += capture;
+
     const trade = {
       id: uid('tr'),
       at: Math.round(this.totalSim * 10) / 10,
-      clock: fmtClock(this.totalSim),
+      clock: fmtClock(this.totalSim, this.clockScale),
       ticker,
       side,
       qty,
-      price: dec(price),
-      fee: Math.round(commAmount),
-      commSigned: this.role === 'IB' && source === 'CLIENT' ? Math.round(commAmount) : -Math.round(commAmount),
+      price: priceStr(price, inst.dp),
+      fee: Math.round(commission),
+      commSigned: this.role === 'IB' && source === 'CLIENT' ? Math.round(commission) : -Math.round(commission),
       source,
+      venue: meta.venue || source,
+      counterparty: meta.counterparty || '',
       capture: Math.round(capture),
-      ...meta,
       posAfter: pos.qty,
       pnlAfter: Math.round(this.roundTotalPnl()),
     };
     this.blotter.unshift(trade);
-    if (this.blotter.length > 80) this.blotter.pop();
-
-    if (this.role === 'IB' && source === 'CLIENT') {
-      this.metrics.markoutsPending.push({
-        dueAt: this.totalSim + BALANCE.adverseHorizon,
-        price,
-        signedQty,
-        ticker,
-        tradeId: trade.id,
-      });
-      this.metrics.spreadCapture += capture;
-      this.metrics.rfqFills += 1;
-      (this.flow[ticker] || (this.flow[ticker] = [])).push({
-        at: this.totalSim,
-        signed: signedQty,
-        notional: qty * price,
-      });
-    }
-
-    // Track AM diversification
-    if (this.role === 'AM') {
-      const activeNames = Object.keys(this.positions).filter(
-        (k) => Math.abs(this.positions[k].qty * this.inst[k].mid) >= 1000000
-      ).length;
-      if (activeNames > this.metrics.maxDiversifiedCount) {
-        this.metrics.maxDiversifiedCount = activeNames;
-      }
-    }
-
+    this.metrics.tradeSeq += 1;
+    if (this.blotter.length > 120) this.blotter.pop();
+    this.emitEvent('fill', { ticker, side, qty, price: trade.price });
     return trade;
   }
 
-  processMarkouts() {
-    const keep = [];
-    for (const m of this.metrics.markoutsPending) {
-      if (this.totalSim >= m.dueAt) {
-        const mo = (this.inst[m.ticker].mid - m.price) * m.signedQty;
-        this.metrics.adverse += mo;
-        const tr = this.blotter.find((b) => b.id === m.tradeId);
-        if (tr) tr.markout = Math.round(mo);
-      } else {
-        keep.push(m);
-      }
-    }
-    this.metrics.markoutsPending = keep;
+  recordExecutionCost(ticker, side, price, notional) {
+    if (this.role !== 'AM') return;
+    const ref = this.inst[ticker].mid;
+    const sign = side === 'BUY' ? 1 : -1;
+    const costBps = ((price - ref) / ref) * 1e4 * sign;
+    this.metrics.execCostSum += costBps * notional;
+    this.metrics.execNotionalSum += notional;
   }
 
-  // --------------------------------------------------------- Exchange Trade
+  // ------------------------------------------------------------ Exchange
   tradeExchange(ticker, side, qty) {
-    if (this.phase !== 'round') return { error: 'Round is not currently active' };
+    if (this.phase !== 'round') return { error: 'Round is not active' };
     const inst = this.inst[ticker];
-    if (!inst) return { error: 'Unknown security ticker' };
-
-    qty = Math.round(Number(qty));
-    if (!Number.isFinite(qty) || qty <= 0) {
+    if (!inst) return { error: 'Unknown security' };
+    const n = Math.round(Number(qty));
+    if (!Number.isFinite(n) || n <= 0) {
       this.metrics.fatFingers += 1;
-      return { error: 'Fat Finger (FFC +1): Invalid volume entered on Exchange' };
+      this.emitEvent('alert', { kind: 'fatfinger' });
+      return { error: 'Fat Finger (FFC +1): volume invalide sur l’Exchange' };
     }
-
-    const notionalMid = qty * inst.mid;
-    if (notionalMid > 12000000) {
+    const notional = n * inst.mid;
+    if (notional > 12000000) {
       this.metrics.fatFingers += 1;
-      this.say('system', 'ib', `FAT FINGER BLOCKED: Exchange order ${qty.toLocaleString()} ${ticker} ($${(notionalMid / 1e6).toFixed(1)}M) exceeds single-clip desk limit! (FFC +1)`, 'RISK-MGR');
-      return { error: `Fat Finger (FFC +1): Single order notional ($${(notionalMid / 1e6).toFixed(1)}M) exceeds $12M clip limit!` };
+      this.emitEvent('alert', { kind: 'fatfinger' });
+      this.say('system', 'ib', `FAT FINGER BLOCKED — ${n.toLocaleString('en-US')} ${ticker} ($${(notional / 1e6).toFixed(1)}M) above single-clip limit. (FFC +1)`, 'RISK-MGR');
+      return { error: `Fat Finger (FFC +1): clip > $12M sur ${ticker}` };
     }
 
     const pos = this.positions[ticker];
-    const signed = side === 'BUY' ? qty : -qty;
+    const signed = side === 'BUY' ? n : -n;
     const newQty = pos.qty + signed;
     const reducing = Math.abs(newQty) < Math.abs(pos.qty);
 
-    const maxSingle = this.role === 'IB' ? BALANCE.ibMaxSingleNotional : BALANCE.amMaxSingleNotional;
-    const maxGross = this.role === 'IB' ? BALANCE.ibMaxGrossNotional : BALANCE.amMaxGrossNotional;
-
-    if (!reducing) {
-      if (Math.abs(newQty * inst.mid) > maxSingle) {
-        return { error: `Single-security risk limit reached on ${ticker} ($${(maxSingle / 1e6).toFixed(0)}M max)` };
+    if (this.role === 'AM') {
+      if (side === 'BUY') {
+        const dq0 = this.depthQuote(ticker, n);
+        if (n * dq0.buyPrice + dq0.commission > this.cash + 1) {
+          return { error: 'Insufficient available cash for this purchase' };
+        }
+      }
+      if (!reducing && Math.abs(newQty * inst.mid) > BALANCE.amMaxSingleNotional) {
+        return { error: `Single-security limit: $${(BALANCE.amMaxSingleNotional / 1e6).toFixed(0)}M max per line` };
       }
       const nextGross = this.grossNotional() - Math.abs(pos.qty * inst.mid) + Math.abs(newQty * inst.mid);
-      if (nextGross > maxGross) {
-        return { error: `Portfolio gross exposure limit reached ($${(maxGross / 1e6).toFixed(0)}M max)` };
+      if (nextGross > BALANCE.amMaxGrossNotional) {
+        return { error: 'Gross exposure limit reached ($30M max)' };
+      }
+    } else {
+      if (!reducing && Math.abs(newQty * inst.mid) > BALANCE.ibMaxSingleNotional) {
+        return { error: 'IB inventory limit reached ($12M per security)' };
+      }
+      const nextGross = this.grossNotional() - Math.abs(pos.qty * inst.mid) + Math.abs(newQty * inst.mid);
+      if (nextGross > BALANCE.ibMaxGrossNotional) {
+        return { error: 'IB gross exposure limit reached ($24M)' };
       }
     }
 
-    const dq = this.depthQuote(ticker, qty);
-    const execPrice = side === 'BUY' ? dq.buyPrice : dq.sellPrice;
-    const comm = dq.commission;
+    const dq = this.depthQuote(ticker, n);
+    const price = side === 'BUY' ? dq.buyPrice : dq.sellPrice;
+    const feeBps = this.role === 'IB' ? BALANCE.ibExchangeFeeBps : BALANCE.amExchangeFeeBps;
+    const commission = Math.round((n * price * feeBps) / 1e4);
 
-    // Track unwind clip discipline
-    if (reducing) {
-      if (qty <= inst.baseDepth * 0.45) this.metrics.clipsUnwoundWell += 1;
-      else if (qty >= inst.baseDepth * 1.15) this.metrics.oversizedExchangeDumps += 1;
-    } else if (this.role === 'AM' && notionalMid >= 1800000) {
-      this.metrics.amExchangeBlocks += 1;
-      if (qty >= inst.baseDepth * 1.1) this.metrics.oversizedExchangeDumps += 1;
+    if (this.role === 'IB') {
+      if (reducing) {
+        if (n <= inst.baseDepth * 0.45) this.metrics.clipsGood += 1;
+        else if (n >= inst.baseDepth * 1.1) this.metrics.dumps += 1;
+      }
+      this.applyFill(ticker, signed, price, commission, 'EXCHANGE', { venue: 'EXCHANGE', counterparty: 'EXCHANGE' });
+      this.metrics.exchangeTrades += 1;
+      this.metrics.exchangeNotional += n * price;
+    } else {
+      this.applyFill(ticker, signed, price, commission, 'EXCHANGE', { venue: 'EXCHANGE', counterparty: 'EXCHANGE' });
+      this.metrics.amExchangeTrades += 1;
+      this.metrics.amExchangeNotional += n * price;
+      this.metrics.amTrades += 1;
+      this.recordExecutionCost(ticker, side, price, n * price);
+      this.metrics.totalTradedNotional += n * price;
+      this.metrics.alignedNotional += this.isAligned(ticker, side) ? n * price : 0;
+      if (n >= inst.baseDepth * 1.15) this.metrics.dumps += 1;
     }
 
-    this.applyFill(ticker, signed, execPrice, comm, 'EXCHANGE', {
-      client: 'EXCHANGE',
-      venue: 'EXCHANGE',
-    });
-
-    // Realistic market impact on Exchange mid
-    const impact = BALANCE.exchangeImpactSlope * (qty / inst.baseDepth) * (side === 'BUY' ? 1 : -1);
+    // Market impact
+    const impact = (n / inst.baseDepth) * (side === 'BUY' ? 1 : -1) * 0.0009;
     inst.logV += impact;
     inst.logTarget += impact * 0.35;
-    this.metrics.exchangeTrades += 1;
 
-    return { ok: true, price: execPrice, qty };
+    return { ok: true, price, qty: n, commission };
   }
 
   hedge(ticker) {
     const pos = this.positions[ticker];
-    if (!pos || pos.qty === 0) return { error: 'No open position to unwind' };
+    if (!pos || pos.qty === 0) return { error: 'Aucune position à couvrir' };
     if (this.hedgeCooldown > 0) return { ok: true };
-    const inst = this.inst[ticker];
-    // Unwind smartly up to 1x baseDepth clip
-    const clip = Math.min(Math.abs(pos.qty), Math.round(inst.baseDepth * 0.5));
-    this.hedgeCooldown = 0.3;
+    const clip = Math.min(Math.abs(pos.qty), Math.round(this.inst[ticker].baseDepth * 0.5));
+    this.hedgeCooldown = 0.25;
     return this.tradeExchange(ticker, pos.qty > 0 ? 'SELL' : 'BUY', clip);
   }
 
-  // ------------------------------------------------ IB Role: Quotes & Flow
-  spawnClientRfq(forcedClient = null, forcedTicker = null, fromProactive = false) {
-    if (this.role !== 'IB') return null;
-    const rng = this.rng;
+  isAligned(ticker, side) {
+    const signal = this.newsSignal[ticker] + this.macroSignal * 0.6;
+    if (Math.abs(signal) < 0.001) return true; // neutral news: not penalised
+    return Math.sign(signal) === (side === 'BUY' ? 1 : -1);
+  }
 
-    let c = forcedClient;
+  // --------------------------------------------------------- IB client flow
+  spawnClientRfq({ client = null, ticker = null, proactive = false } = {}) {
+    if (this.role !== 'IB') return null;
+    let c = client;
     if (!c) {
-      const candidates = this.clients.filter((cl) =>
-        !this.clientRequests.some((r) => r.clientRoom === cl.roomId && r.status === 'open')
-      );
-      if (!candidates.length) return null;
-      c = rng.pick(candidates);
+      const busy = new Set(this.clientRequests.filter((r) => r.status === 'open').map((r) => r.clientId));
+      const free = this.clients.filter((cl) => !busy.has(cl.id));
+      if (!free.length) return null;
+      c = this.rng.pick(free);
     }
 
-    // Weight towards stocks with recent breaking news / active price discovery
-    const tickers = Object.keys(this.inst);
-    let ticker = forcedTicker && this.inst[forcedTicker] ? forcedTicker : null;
-    if (!ticker) {
-      const weights = tickers.map((t) => {
-        const i = this.inst[t];
-        const gap = Math.abs(i.logTarget - i.logV);
-        const recent = this.news[0] && (this.news[0].ticker === t || this.news[0].kind === 'MACRO') ? 2.2 : 0.7;
-        return 0.8 + gap * 18 + recent;
+    let tk = ticker && this.inst[ticker] ? ticker : null;
+    if (!tk) {
+      const weights = TICKERS.map((t) => {
+        const gap = Math.abs(this.inst[t].logTarget - this.inst[t].logV);
+        const recent = this.news[0] && (this.news[0].ticker === t || this.news[0].kind === 'MACRO') ? 2.2 : 0.6;
+        return 0.7 + gap * 22 + recent;
       });
       const sum = weights.reduce((a, b) => a + b, 0);
-      let x = rng.next() * sum;
+      let x = this.rng.next() * sum;
       let idx = 0;
-      while (x > weights[idx] && idx < weights.length - 1) { x -= weights[idx]; idx++; }
-      ticker = tickers[idx];
+      while (x > weights[idx] && idx < TICKERS.length - 1) { x -= weights[idx]; idx += 1; }
+      tk = TICKERS[idx];
     }
 
-    const inst = this.inst[ticker];
-    const targetNotional = rng.pick(c.notionalPref);
-    const step = inst.ref >= 150 ? 1000 : 5000;
+    const inst = this.inst[tk];
+    const targetNotional = this.rng.pick(c.notionalPref);
+    const step = inst.mid >= 150 ? 1000 : 5000;
     const qty = Math.max(step, Math.round((targetNotional / inst.mid) / step) * step);
+    const k = Math.round(qty / 1000);
 
     const gap = inst.logTarget - inst.logV;
-    const informed = rng.chance(c.informedness);
-    let edgePct;
-    if (informed && Math.abs(gap) > 0.008) {
-      const dir = Math.sign(gap);
-      edgePct = dir * Math.min(0.026, Math.max(0.011, Math.abs(gap) * 0.42)) * rng.range(0.8, 1.15);
-    } else {
-      // Liquidity / rebalancing client willing to pay tighter than Exchange block spread (~1.7%)
-      edgePct = (rng.chance(0.5) ? 1 : -1) * rng.range(0.011, 0.021);
-    }
+    const informed = this.rng.chance(c.informedness);
+    const dir = Math.sign(gap) || (this.rng.chance(0.5) ? 1 : -1);
+    // Informed flow keeps part of its edge, but the market maker's 20-110 bps
+    // spread must stay profitable on average (otherwise SSRM/PnL are unwinnable).
+    const edgePct = informed && Math.abs(gap) > 0.002
+      ? dir * Math.min(0.0042, Math.max(0.0012, Math.abs(gap) * 0.18)) * this.rng.range(0.8, 1.2)
+      : (this.rng.chance(0.5) ? 1 : -1) * this.rng.range(0.0002, 0.0018);
+
+    let template = this.rng.pick(CLIENT_MESSAGE_TEMPLATES);
+    let sideBias = 0;
+    if (informed && Math.abs(gap) > 0.012) sideBias = Math.sign(gap);
+    else if (template.includes('Buy price')) sideBias = 1;
+    else if (template.includes('Sell price')) sideBias = -1;
+    else if (this.rng.chance(0.22)) sideBias = this.rng.chance(0.5) ? 1 : -1;
+
+    const line = template
+      .replaceAll('{ticker}', tk)
+      .replaceAll('{tickerLower}', tk.toLowerCase())
+      .replaceAll('{k}', String(k));
 
     const req = {
       id: uid('rfq'),
-      clientRoom: c.roomId,
+      clientId: c.id,
+      clientName: c.name,
       team: c.team,
-      traderCode: c.traderCode,
-      arch: c.arch,
-      archLabel: c.label,
-      ticker,
+      ticker: tk,
       qty,
+      sideBias,
+      message: line,
       createdAt: this.totalSim,
       expiresAt: this.totalSim + BALANCE.rfqExpiry,
       status: 'open',
       informed,
-      fromProactive,
       edgePct,
       fairPrice: inst.mid * (1 + edgePct),
+      fromProactive: proactive,
     };
-
-    // Replace any older open request in the same client room
     for (const old of this.clientRequests) {
-      if (old.clientRoom === c.roomId && old.status === 'open') old.status = 'replaced';
+      if (old.clientId === c.id && old.status === 'open') old.status = 'replaced';
     }
     this.clientRequests.push(req);
-    if (this.clientRequests.length > 50) this.clientRequests.shift();
+    if (this.clientRequests.length > 60) this.clientRequests.shift();
 
-    const line = fromProactive
-      ? `y pls - ${qty.toLocaleString('en-US')} ${ticker}`
-      : rng.pick(CLIENT_RFQ_TEMPLATES).replace('{qty}', qty.toLocaleString('en-US')).replace('{t}', ticker);
-
-    this.say('client', c.roomId, line, c.traderCode);
+    this.say('client', c.id, line, `${c.name} · ${c.team}`);
+    c.unread = (c.unread || 0) + 1;
+    this.emitEvent('rfq', { ticker: tk, qty, team: c.team });
+    if (proactive) this.metrics.proactiveConversions += 0;
     return req;
   }
 
-  sendQuote({ clientRoom, ticker, bid, offer, bidVol, offerVol, validFor = 45, rfqId = null }) {
+  sendQuote({ clientRoom, ticker, bid, offer, bidVol, offerVol, validFor = 45 }) {
     if (this.phase !== 'round') return { error: 'Round is not active' };
-    if (this.role !== 'IB') return { error: 'Switch to IB role to send market-making quotes' };
+    if (this.role !== 'IB') return { error: 'Quote Ticket is only available in IB-55 role' };
 
-    // Resolve target client
-    let targetRoom = clientRoom;
-    if (!targetRoom && rfqId) {
-      const found = this.clientRequests.find((r) => r.id === rfqId);
-      if (found) targetRoom = found.clientRoom;
-    }
-    const client = this.clients.find((c) => c.roomId === targetRoom) || this.clients[0];
-    if (!client) return { error: 'Select a valid HF / AM client in Chat' };
+    const client = this.clients.find((c) => c.id === clientRoom || c.team === clientRoom) || null;
+    if (!client) return { error: 'Select a client in the Chat panel first' };
 
     const tk = String(ticker || '').toUpperCase().trim();
     const inst = this.inst[tk];
     if (!inst) return { error: `Unknown ticker "${tk}"` };
 
-    bid = Number(bid);
-    offer = Number(offer);
-    bidVol = Math.round(Number(bidVol));
-    offerVol = Math.round(Number(offerVol));
-    const ttl = Math.max(5, Math.min(120, Math.round(Number(validFor) || 45)));
+    const b = Number(bid); const o = Number(offer);
+    const bv = Math.round(Number(bidVol)); const ov = Math.round(Number(offerVol));
+    const ttl = clamp(Math.round(Number(validFor) || 45), 5, 120);
 
-    if (![bid, offer, bidVol, offerVol].every(Number.isFinite) || bid <= 0 || offer <= 0) {
+    if (![b, o, bv, ov].every(Number.isFinite) || b <= 0 || o <= 0) {
       this.metrics.fatFingers += 1;
-      return { error: 'Fat Finger (FFC +1): Enter valid positive Bid, Offer, and Volumes' };
+      this.emitEvent('alert', { kind: 'fatfinger' });
+      return { error: 'Fat Finger (FFC +1): bid, offer et volumes doivent être positifs' };
     }
-    if (bid >= offer) {
+    if (b >= o) {
       this.metrics.fatFingers += 1;
-      this.say('system', 'ib', `FAT FINGER (FFC +1): Inverted quote on ${tk} (Bid ${bid} >= Offer ${offer})!`, 'RISK-MGR');
-      return { error: 'Fat Finger (FFC +1): Bid price must be strictly lower than Offer price!' };
+      this.emitEvent('alert', { kind: 'fatfinger' });
+      this.say('system', 'ib', `FAT FINGER (FFC +1) — inverted quote on ${tk} (${b} / ${o}).`, 'RISK-MGR');
+      return { error: 'Fat Finger (FFC +1): le bid doit être strictement inférieur à l’offer' };
     }
-    if (bidVol < 500 || offerVol < 500 || bidVol > 250000 || offerVol > 250000) {
+    if (bv < 500 || ov < 500 || bv > 500000 || ov > 500000) {
       this.metrics.fatFingers += 1;
-      return { error: 'Fat Finger (FFC +1): Quote volume must be between 500 and 250,000 shares' };
+      this.emitEvent('alert', { kind: 'fatfinger' });
+      return { error: 'Fat Finger (FFC +1): volumes entre 500 et 500 000 titres' };
     }
-
     const mid = inst.mid;
-    // Extreme typo check (e.g. 550 instead of 55, or 5.5 instead of 55)
-    if (bid < mid * 0.65 || offer > mid * 1.35 || bid > mid * 1.30 || offer < mid * 0.70) {
+    if (b < mid * 0.7 || o > mid * 1.3 || b > mid * 1.2 || o < mid * 0.8) {
       this.metrics.fatFingers += 1;
-      this.say('system', 'ib', `FAT FINGER BLOCKED (FFC +1): ${tk} quote ${bid}/${offer} is >30% away from RefPrice $${mid.toFixed(2)}!`, 'RISK-MGR');
-      return { error: `Fat Finger Blocked (FFC +1): Quote (${bid} / ${offer}) is far off RefPrice ($${mid.toFixed(2)})` };
+      this.emitEvent('alert', { kind: 'fatfinger' });
+      this.say('system', 'ib', `FAT FINGER BLOCKED (FFC +1) — ${tk} ${b} / ${o} is >30% away from REFPRICE ${mid.toFixed(inst.dp)}.`, 'RISK-MGR');
+      return { error: `Fat Finger Blocked (FFC +1): prix trop loin du REFPRICE (${mid.toFixed(inst.dp)})` };
     }
 
-    // Warn & count FFC if badly off-market (>8% crossed against RefPrice)
-    if (bid > mid * 1.08 || offer < mid * 0.92) {
-      this.metrics.fatFingers += 1;
-      this.say('system', 'ib', `WARNING (FFC +1): Off-market quote sent on ${tk} (${bid}/${offer} vs Ref $${mid.toFixed(2)})!`, 'RISK-MGR');
-    }
+    const dec = (v) => priceStr(v, inst.dp);
+    const halfSpreadBps = (((o - b) / 2) / mid) * 1e4;
 
-    //Supersede any existing live quote for same client + same ticker
+    // supersede existing live quote for same client/ticker
     for (const q of this.liveQuotes) {
-      if (q.status === 'live' && q.clientRoom === client.roomId && q.ticker === tk) {
+      if (q.status === 'live' && q.clientId === client.id && q.ticker === tk) {
         q.status = 'replaced';
-        q.closedClock = fmtClock(this.totalSim);
+        q.closedClock = fmtClock(this.totalSim, this.clockScale);
         this.oldQuotes.unshift({ ...q });
       }
     }
     this.liveQuotes = this.liveQuotes.filter((q) => q.status === 'live');
 
-    const matchingReq = this.clientRequests.find(
-      (r) => r.clientRoom === client.roomId && r.ticker === tk && r.status === 'open'
+    const matching = this.clientRequests.find(
+      (r) => r.clientId === client.id && r.ticker === tk && r.status === 'open',
     );
 
-    const dec = inst.ref >= 100 ? r2 : r3;
     const quote = {
       id: uid('q'),
       role: 'IB',
-      clientRoom: client.roomId,
+      clientId: client.id,
       team: client.team,
-      traderCode: client.traderCode,
+      clientName: client.name,
       ticker: tk,
-      bid: dec(bid),
-      offer: dec(offer),
-      bidVol,
-      offerVol,
+      bid: dec(b),
+      offer: dec(o),
+      bidVol: bv,
+      offerVol: ov,
       validFor: ttl,
+      refAtQuote: mid,
       createdAt: this.totalSim,
       expiresAt: this.totalSim + ttl,
       decideAt: this.totalSim + this.rng.range(BALANCE.decisionDelayMin, BALANCE.decisionDelayMax),
-      evaluatedOnce: false,
-      rfqId: matchingReq?.id || null,
       status: 'live',
+      rfqId: matching?.id || null,
     };
-
     this.liveQuotes.unshift(quote);
     this.metrics.quotesSent += 1;
-    this.metrics.volumeQuoted += Math.round((bidVol + offerVol) / 2);
+    this.metrics.quoteSpreadSum += halfSpreadBps;
+    this.metrics.quoteSpreadCount += 1;
+    this.metrics.quoteQualitySum += this.scoreSpreadQuote(halfSpreadBps);
+    if (halfSpreadBps > BALANCE.ibQuoteWideHalfBps) this.metrics.wideQuotes += 1;
+    if (halfSpreadBps < 8) this.metrics.razorQuotes += 1;
 
-    // Exact AmplifyME chat confirmation line (matches image-1.png!)
-    this.say(
-      'me',
-      client.roomId,
-      `Quote was created. ${tk}, bid:${quote.bid}, offer:${quote.offer}, bidvol:${bidVol}, offervol:${offerVol}`,
-      'You'
-    );
-
-    return { ok: true, quoteId: quote.id };
+    this.say('me', client.id, `Quote was created. ${tk}, bid:${quote.bid}, offer:${quote.offer}, bidvol:${bv}, offervol:${ov}`, 'You');
+    if (matching) matching.quoted = true;
+    return { ok: true, quoteId: quote.id, halfSpreadBps: Math.round(halfSpreadBps * 10) / 10 };
   }
 
   cancelQuote(quoteId) {
@@ -893,572 +998,498 @@ export class Session {
     if (idx === -1) return { error: 'Quote is no longer live' };
     const q = this.liveQuotes[idx];
     q.status = 'cancelled';
-    q.closedClock = fmtClock(this.totalSim);
+    q.closedClock = fmtClock(this.totalSim, this.clockScale);
     this.liveQuotes.splice(idx, 1);
     this.oldQuotes.unshift(q);
     if (this.oldQuotes.length > 40) this.oldQuotes.pop();
     this.metrics.quotesCancelled += 1;
-    this.say('me', q.clientRoom || q.dealerRoom, `Quote cancelled on ${q.ticker}.`, 'You');
+    this.say('me', q.clientId || q.dealerId, `Quote cancelled on ${q.ticker}.`, 'You');
     return { ok: true };
   }
 
+  executeClientQuote(q, side, qty, price, label = 'client') {
+    const inst = this.inst[q.ticker];
+    const signed = side === 'BUY' ? qty : -qty;
+    const commission = Math.round((qty * price * BALANCE.ibClientCommBps) / 1e4);
+    const trade = this.applyFill(q.ticker, signed, price, commission, 'CLIENT', {
+      counterparty: q.team,
+      venue: 'OTC',
+    });
+    this.metrics.clientFills += 1;
+    this.metrics.clientVolume += qty;
+    this.metrics.clientNotional += qty * price;
+    const client = this.clients.find((c) => c.id === q.clientId);
+    if (client) {
+      client.trades += 1;
+      client.volume += qty;
+    }
+    const cat = q.team.startsWith('AM') ? 'AM' : 'HF';
+    const action = side === 'BUY' ? 'sell' : 'buy';
+    this.say(
+      'client',
+      q.clientId,
+      `The quote has been executed on by ${cat}. ${q.ticker}, hfaction:${action}, volume:${qty}, price:${priceStr(price, inst.dp)}`,
+      `${q.clientName} · ${q.team}`,
+    );
+    q.status = 'filled';
+    q.fillSide = side;
+    q.fillPrice = priceStr(price, inst.dp);
+    q.fillQty = qty;
+    q.closedClock = fmtClock(this.totalSim, this.clockScale);
+    this.oldQuotes.unshift({ ...q });
+    if (this.oldQuotes.length > 40) this.oldQuotes.pop();
+    void label;
+    return trade;
+  }
+
   evaluateIbQuotes() {
-    const stillLive = [];
+    const still = [];
     for (const q of this.liveQuotes) {
       if (q.status !== 'live') continue;
+      const inst = this.inst[q.ticker];
+      const req = this.clientRequests.find((r) => r.id === q.rfqId) || null;
+      const openReq = req && req.status === 'open' ? req : this.clientRequests.find(
+        (r) => r.clientId === q.clientId && r.ticker === q.ticker && r.status === 'open',
+      );
 
       if (this.totalSim >= q.expiresAt) {
         q.status = 'expired';
-        q.closedClock = fmtClock(this.totalSim);
-        this.oldQuotes.unshift(q);
+        q.closedClock = fmtClock(this.totalSim, this.clockScale);
+        this.oldQuotes.unshift({ ...q });
         continue;
       }
 
-      if (this.totalSim < q.decideAt) {
-        stillLive.push(q);
-        continue;
-      }
-
-      const inst = this.inst[q.ticker];
+      // A live quote is "subject to market": if the REFPRICE drifts more than
+      // 35 bps away, the quote lapses instead of becoming a free option for
+      // informed flow. The MM must re-quote on the new mid (core skill).
       const mid = inst.mid;
-      const client = this.clients.find((c) => c.roomId === q.clientRoom);
-      const req = this.clientRequests.find((r) => r.id === q.rfqId && r.status === 'open');
-
-      let clientSide = null;
-      if (!q.evaluatedOnce) {
-        // Initial evaluation when client checks your fresh quote
-        const desiredQty = req ? req.qty : Math.min(q.bidVol, q.offerVol);
-        const exch = this.depthQuote(q.ticker, desiredQty);
-        const fair = req ? req.fairPrice : mid * (1 + (this.rng.chance(0.5) ? 0.008 : -0.008));
-
-        if (req && !req.informed) {
-          // Liquidity client executes if your price beats the Exchange block depth price!
-          if (req.edgePct > 0 && q.offer <= Math.max(fair, exch.buyPrice * 0.996)) clientSide = 'BUY';
-          else if (req.edgePct < 0 && q.bid >= Math.min(fair, exch.sellPrice * 1.004)) clientSide = 'SELL';
-        } else {
-          if (q.offer <= fair) clientSide = 'BUY';
-          else if (q.bid >= fair) clientSide = 'SELL';
-        }
-
-        if (!clientSide) {
-          q.evaluatedOnce = true;
-          const widthPct = ((q.offer - q.bid) / mid) * 100;
-          if (req && widthPct > 3.6 && this.rng.chance(0.7)) {
-            this.say('client', q.clientRoom, 'That spread is too wide vs Exchange — watching if market moves.', q.traderCode);
-          }
-          stillLive.push(q);
-          continue;
-        }
-      } else {
-        // Quote was left open in LIVE CHAT QUOTES: only sniped if market mid moves meaningfully through your quote!
-        if (mid >= q.offer * 1.008) clientSide = 'BUY';
-        else if (mid <= q.bid * 0.992) clientSide = 'SELL';
-        else {
-          stillLive.push(q);
-          continue;
-        }
-      }
-
-      // Client wants to execute!
-      const execPrice = clientSide === 'BUY' ? q.offer : q.bid;
-      const availVol = clientSide === 'BUY' ? q.offerVol : q.bidVol;
-      const fillQty = req ? Math.min(req.qty, availVol) : availVol;
-      const ourSigned = clientSide === 'BUY' ? -fillQty : fillQty;
-
-      // Risk limit check on our IB book
-      const pos = this.positions[q.ticker];
-      const newQty = pos.qty + ourSigned;
-      const reducing = Math.abs(newQty) < Math.abs(pos.qty);
-      const nextGross = this.grossNotional() - Math.abs(pos.qty * mid) + Math.abs(newQty * mid);
-
-      if (!reducing && (Math.abs(newQty * mid) > BALANCE.ibMaxSingleNotional || nextGross > BALANCE.ibMaxGrossNotional)) {
-        q.status = 'rejected';
-        q.closedClock = fmtClock(this.totalSim);
-        this.oldQuotes.unshift(q);
-        this.metrics.rejects += 1;
-        this.say('system', 'ib', `RISK REJECT: Client fill on ${q.ticker} blocked — single-stock ($8M) or gross ($20M) limit exceeded! Unwind inventory!`, 'RISK-MGR');
+      const driftBps = Math.abs(mid / (q.refAtQuote || mid) - 1) * 1e4;
+      if (driftBps > 35) {
+        q.status = 'stale';
+        q.closedClock = fmtClock(this.totalSim, this.clockScale);
+        this.oldQuotes.unshift({ ...q });
         continue;
       }
-
-      const wasStaleSnipe = q.evaluatedOnce && ((clientSide === 'BUY' && mid > q.offer * 1.005) || (clientSide === 'SELL' && mid < q.bid * 0.995));
-      if (wasStaleSnipe) {
-        this.metrics.staleSniped += 1;
-        this.say('system', 'ib', `SNIPED: ${q.traderCode} picked off your stale ${q.ticker} quote @ ${execPrice} after market moved to $${mid.toFixed(2)}! Cancel old quotes on news!`, 'FLOW-DESK');
+      // News-crossed stale quote → immediate sniping at our quoted price.
+      const crossedOffer = mid > q.offer * 1.0035;
+      const crossedBid = mid < q.bid * 0.9965;
+      if (crossedOffer || crossedBid) {
+        // Client lifts our offer (we sell) or hits our bid (we buy).
+        const clientBuys = crossedOffer;
+        const qty = Math.min(openReq?.qty || 10000, clientBuys ? q.offerVol : q.bidVol);
+        if (qty >= 500) {
+          const price = clientBuys ? q.offer : q.bid;
+          this.metrics.staleSniped += 1;
+          this.metrics.adverse += (mid - price) * (clientBuys ? -qty : qty);
+          if (openReq) openReq.status = 'filled';
+          this.executeClientQuote(q, clientBuys ? 'SELL' : 'BUY', qty, price);
+          continue;
+        }
       }
 
-      const commEarned = fillQty * execPrice * BALANCE.ibClientCommRate;
-      this.applyFill(q.ticker, ourSigned, execPrice, commEarned, 'CLIENT', {
-        client: q.traderCode,
-        team: q.team,
-        venue: q.team,
-      });
+      if (this.totalSim < q.decideAt || !openReq) { still.push(q); continue; }
 
-      q.status = 'filled';
-      q.fillSide = clientSide;
-      q.fillQty = fillQty;
-      q.fillPrice = execPrice;
-      q.closedClock = fmtClock(this.totalSim);
-      this.oldQuotes.unshift(q);
+      const fair = openReq.fairPrice || mid;
+      const qtyAsked = openReq.qty;
+      const canBuy = q.offerVol >= Math.max(500, qtyAsked * 0.5);
+      const canSell = q.bidVol >= Math.max(500, qtyAsked * 0.5);
 
-      if (req) {
-        req.status = 'done';
-        if (req.fromProactive) this.metrics.proactiveConversions += 1;
+      let wantBuy = openReq.sideBias > 0;
+      if (openReq.sideBias === 0) wantBuy = fair >= mid ? this.rng.chance(0.62) : this.rng.chance(0.38);
+
+      const offerEdgeBps = ((fair - q.offer) / mid) * 1e4;
+      const bidEdgeBps = ((q.bid - fair) / mid) * 1e4;
+      const offerVsRefBps = ((q.offer - mid) / mid) * 1e4;
+      const bidVsRefBps = ((mid - q.bid) / mid) * 1e4;
+
+      let prob = 0;
+      let tradeSide = null;
+      if (wantBuy && canBuy) {
+        if (offerEdgeBps > 1) prob = 0.9;
+        else if (offerVsRefBps <= 130) prob = 0.8 - offerVsRefBps * 0.002;
+        else prob = Math.max(0, 0.54 - (offerVsRefBps - 130) * 0.0032);
+        tradeSide = 'BUY';
+      } else if (!wantBuy && canSell) {
+        if (bidEdgeBps > 1) prob = 0.9;
+        else if (bidVsRefBps <= 130) prob = 0.8 - bidVsRefBps * 0.002;
+        else prob = Math.max(0, 0.54 - (bidVsRefBps - 130) * 0.0032);
+        tradeSide = 'SELL';
       }
-      if (client) {
-        client.trades += 1;
-        client.volume += fillQty;
-        if (req?.informed) client.informedTrades += 1;
-      }
 
-      this.say(
-        'client',
-        q.clientRoom,
-        clientSide === 'BUY'
-          ? `Done! Bought ${fillQty.toLocaleString('en-US')} ${q.ticker} @ ${execPrice} (Comm +$${Math.round(commEarned).toLocaleString('en-US')})`
-          : `Done! Sold ${fillQty.toLocaleString('en-US')} ${q.ticker} @ ${execPrice} (Comm +$${Math.round(commEarned).toLocaleString('en-US')})`,
-        q.traderCode
-      );
+      // clients dislike one-way volumes that are too small for the request
+      const available = tradeSide === 'BUY' ? q.offerVol : q.bidVol;
+      if (available < qtyAsked * 0.5) prob = 0;
+      prob = clamp(prob * (0.6 + openReq.informed * 0.5), 0, 0.95);
+
+      if (tradeSide && this.rng.chance(prob)) {
+        const fillQty = Math.min(qtyAsked, available);
+        // tradeSide is the CLIENT direction: a client buyer lifts our offer
+        // (we sell), a client seller hits our bid (we buy).
+        const price = tradeSide === 'BUY' ? q.offer : q.bid;
+        const mmSide = tradeSide === 'BUY' ? 'SELL' : 'BUY';
+        openReq.status = 'filled';
+        this.executeClientQuote(q, mmSide, fillQty, price);
+        continue;
+      }
+      still.push(q);
     }
-
-    this.liveQuotes = stillLive;
-    if (this.oldQuotes.length > 45) this.oldQuotes.length = 45;
-
-    // Expire unanswered client requests cleanly
-    for (const r of this.clientRequests) {
-      if (r.status === 'open' && this.totalSim >= r.expiresAt) {
-        r.status = 'expired';
-        this.say('client', r.clientRoom, `Moving on — went elsewhere on ${r.ticker}.`, r.traderCode);
-      }
-    }
+    this.liveQuotes = still.filter((q) => q.status === 'live');
   }
 
-  // ------------------------------------------------ AM Role: Dealer Quotes
-  requestQuote({ dealerRoom = 'ALL', ticker, qty }) {
+  // --------------------------------------------------------- AM dealer flow
+  requestQuote({ dealerRoom = 'ALL', ticker, qty, silent = false }) {
     if (this.phase !== 'round') return { error: 'Round is not active' };
-    if (this.role !== 'AM') return { error: 'Request Quote is for Asset Manager (AM) role' };
-
+    if (this.role !== 'AM') return { error: 'RFQ is only available in AM-55 role' };
     const tk = String(ticker || '').toUpperCase().trim();
     const inst = this.inst[tk];
-    if (!inst) return { error: `Unknown security "${tk}"` };
-
-    qty = Math.round(Number(qty));
-    if (!Number.isFinite(qty) || qty < 500 || qty > 250000) {
+    if (!inst) return { error: `Unknown ticker "${tk}"` };
+    const n = Math.round(Number(qty));
+    if (!Number.isFinite(n) || n < 100) return { error: 'Invalid quantity' };
+    if (n * inst.mid > 12000000) {
       this.metrics.fatFingers += 1;
-      return { error: 'Fat Finger (FFC +1): Request volume must be between 500 and 250,000 shares' };
+      this.emitEvent('alert', { kind: 'fatfinger' });
+      return { error: 'Fat Finger (FFC +1): demande de quote > $12M' };
     }
 
     const targets = dealerRoom === 'ALL'
       ? this.dealers
-      : this.dealers.filter((d) => d.roomId === dealerRoom);
-    if (!targets.length) return { error: 'Select an IB dealer' };
+      : this.dealers.filter((d) => d.id === dealerRoom);
+    if (!targets.length) return { error: 'Unknown dealer' };
 
     for (const d of targets) {
-      this.say('me', d.roomId, `Could you make me a price for ${qty.toLocaleString('en-US')} ${tk} please?`, 'You');
-      const delay = this.rng.range(d.speedSec[0], d.speedSec[1]);
+      const spec = d.specialty.includes(tk);
+      const base = d.baseHalfBps + (spec ? 0 : 13);
+      const sizeBps = (n / (inst.baseDepth * 2)) * 9;
+      const halfBps = Math.max(3.5, base + sizeBps + this.rng.range(-3.5, 6.5));
+      const delay = this.rng.range(d.speedSec[0], d.speedSec[1]) + (dealerRoom === 'ALL' ? 0.3 : 0);
       this.pendingDealerQuotes.push({
-        dueAt: this.totalSim + delay,
-        dealer: d,
+        id: uid('dq'),
+        dealerId: d.id,
         ticker: tk,
-        qty,
+        qty: n,
+        halfBps,
+        dueAt: this.totalSim + delay,
+        validFor: Math.round(this.rng.range(25, 45)),
+        createdAt: this.totalSim,
+        refAtRequest: inst.mid,
       });
+      d.quotes += 1;
     }
-    return { ok: true };
+    if (!silent) {
+      if (dealerRoom === 'ALL') {
+        this.say('me', 'am', `Shopping all dealers — ${n.toLocaleString('en-US')} ${tk}`, 'You');
+      } else {
+        this.say('me', dealerRoom, `${n.toLocaleString('en-US')} ${tk} pls`, 'You');
+      }
+    }
+    return { ok: true, pending: targets.length };
   }
 
   processDealerReplies() {
-    if (this.role !== 'AM') return;
-    const rem = [];
+    const keep = [];
     for (const p of this.pendingDealerQuotes) {
-      if (this.totalSim < p.dueAt) {
-        rem.push(p);
-        continue;
-      }
+      if (this.totalSim < p.dueAt) { keep.push(p); continue; }
+      const d = this.dealers.find((x) => x.id === p.dealerId);
+      if (!d) continue;
       const inst = this.inst[p.ticker];
-      const d = p.dealer;
-      const isSpec = d.specialty.includes(p.ticker);
-      const depthRatio = p.qty / inst.baseDepth;
-      // IB dealers offer significantly tighter block spreads than the Exchange!
-      let halfBps = d.baseHalfBps * (isSpec ? 0.72 : 1.0) + depthRatio * 14 + this.rng.range(-4, 6);
-      halfBps = Math.max(20, Math.min(130, halfBps));
-      const skew = this.rng.gauss() * 0.0008;
-      const dec = inst.ref >= 100 ? r2 : r3;
-      const bid = dec(inst.mid * (1 - halfBps / 10000 + skew));
-      const offer = dec(inst.mid * (1 + halfBps / 10000 + skew));
-
-      // Replace prior live quote from same IB on same ticker
-      for (const q of this.liveQuotes) {
-        if (q.status === 'live' && q.dealerRoom === d.roomId && q.ticker === p.ticker) {
-          q.status = 'replaced';
-          q.closedClock = fmtClock(this.totalSim);
-          this.oldQuotes.unshift({ ...q });
-        }
-      }
-      this.liveQuotes = this.liveQuotes.filter((q) => q.status === 'live');
-
-      const quote = {
-        id: uid('ibq'),
+      if (!inst) continue;
+      const dec = (v) => priceStr(v, inst.dp);
+      const mid = inst.mid;
+      const bid = dec(mid * (1 - p.halfBps / 1e4));
+      const offer = dec(mid * (1 + p.halfBps / 1e4));
+      const vol = Math.round((p.qty * this.rng.range(1.0, 1.8)) / 1000) * 1000;
+      const q = {
+        id: p.id,
         role: 'AM',
-        dealerRoom: d.roomId,
-        team: d.team,
-        traderCode: d.traderCode,
+        dealerId: d.id,
+        dealerName: d.name,
+        team: d.name,
         ticker: p.ticker,
         bid,
         offer,
-        bidVol: p.qty,
-        offerVol: p.qty,
-        validFor: 35,
+        bidVol: vol,
+        offerVol: vol,
+        validFor: p.validFor,
+        refAtQuote: mid,
         createdAt: this.totalSim,
-        expiresAt: this.totalSim + 35,
+        expiresAt: this.totalSim + p.validFor,
         status: 'live',
+        halfBps: Math.round(p.halfBps * 10) / 10,
+        qtyRequested: p.qty,
       };
-      this.liveQuotes.unshift(quote);
+      this.liveQuotes.unshift(q);
+      if (this.liveQuotes.length > 24) this.liveQuotes.pop();
       this.say(
         'client',
-        d.roomId,
-        `Quote was created. ${p.ticker}, bid:${bid}, offer:${offer}, bidvol:${p.qty}, offervol:${p.qty}`,
-        d.traderCode
+        d.id,
+        `${p.ticker} ${Math.round(p.qty / 1000)}k — ${bid} / ${offer} · ${vol.toLocaleString('en-US')} × ${vol.toLocaleString('en-US')} · valid ${p.validFor}s`,
+        `${d.name} · Dealer`,
       );
+      this.emitEvent('quote', { ticker: p.ticker, dealer: d.name });
     }
-    this.pendingDealerQuotes = rem;
-
-    // Expire old dealer quotes
-    const keep = [];
-    for (const q of this.liveQuotes) {
-      if (this.totalSim >= q.expiresAt) {
-        q.status = 'expired';
-        q.closedClock = fmtClock(this.totalSim);
-        this.oldQuotes.unshift(q);
-      } else {
-        keep.push(q);
-      }
-    }
-    this.liveQuotes = keep;
+    this.pendingDealerQuotes = keep;
   }
 
-  acceptDealerQuote({ quoteId, side, qty }) {
-    if (this.phase !== 'round' || this.role !== 'AM') return { error: 'Not in active AM round' };
+  acceptDealerQuote({ quoteId, side = 'BUY', qty = null }) {
+    if (this.phase !== 'round') return { error: 'Round is not active' };
+    if (this.role !== 'AM') return { error: 'Only AM-55 can execute dealer quotes' };
     const idx = this.liveQuotes.findIndex((q) => q.id === quoteId && q.status === 'live');
-    if (idx === -1) return { error: 'Dealer quote expired or no longer available' };
-
+    if (idx === -1) return { error: 'Quote is no longer live' };
     const q = this.liveQuotes[idx];
+    if (this.totalSim > q.expiresAt) {
+      this.liveQuotes.splice(idx, 1);
+      return { error: 'Quote has expired' };
+    }
+    const n = Math.round(Number(qty) || q.offerVol);
+    if (!Number.isFinite(n) || n <= 0) {
+      this.metrics.fatFingers += 1;
+      this.emitEvent('alert', { kind: 'fatfinger' });
+      return { error: 'Fat Finger (FFC +1): invalid size' };
+    }
+    if (n > q.bidVol * 1.02) {
+      return { error: `Size above quoted volume (${q.bidVol.toLocaleString('en-US')})` };
+    }
     const inst = this.inst[q.ticker];
-    const maxVol = side === 'BUY' ? q.offerVol : q.bidVol;
-    const fillQty = qty ? Math.min(Math.round(Number(qty)), maxVol) : maxVol;
-    if (!Number.isFinite(fillQty) || fillQty <= 0) return { error: 'Invalid trade volume' };
-
-    const signed = side === 'BUY' ? fillQty : -fillQty;
+    const price = side === 'BUY' ? q.offer : q.bid;
+    const notional = n * price;
+    const commission = Math.round((notional * BALANCE.amDealerCommBps) / 1e4);
+    if (side === 'BUY' && notional + commission > this.cash) {
+      return { error: `Insufficient available cash ($${Math.round(this.cash).toLocaleString('en-US')})` };
+    }
+    const signed = side === 'BUY' ? n : -n;
     const pos = this.positions[q.ticker];
     const newQty = pos.qty + signed;
-    const reducing = Math.abs(newQty) < Math.abs(pos.qty);
-
-    if (!reducing) {
-      if (Math.abs(newQty * inst.mid) > BALANCE.amMaxSingleNotional) {
-        return { error: `Mandate Limit: Max $8M (40%) per security (${q.ticker})` };
-      }
-      const nextGross = this.grossNotional() - Math.abs(pos.qty * inst.mid) + Math.abs(newQty * inst.mid);
-      if (nextGross > BALANCE.amMaxGrossNotional) {
-        return { error: 'Mandate Limit: Max $25M gross fund exposure reached' };
-      }
+    if (!(Math.abs(newQty) < Math.abs(pos.qty)) && Math.abs(newQty * inst.mid) > BALANCE.amMaxSingleNotional) {
+      return { error: `Single-security limit: $${(BALANCE.amMaxSingleNotional / 1e6).toFixed(0)}M max per line` };
     }
-
-    const execPrice = side === 'BUY' ? q.offer : q.bid;
-    const comm = fillQty * execPrice * BALANCE.amIbCommRate;
-
-    this.applyFill(q.ticker, signed, execPrice, comm, 'IB_QUOTE', {
-      client: q.traderCode,
-      team: q.team,
-      venue: q.team,
+    this.applyFill(q.ticker, signed, price, commission, 'DEALER', {
+      venue: q.dealerName,
+      counterparty: q.dealerName,
     });
-    this.metrics.amIbBlocks += 1;
+    this.metrics.amDealerTrades += 1;
+    this.metrics.amDealerNotional += notional;
+    this.metrics.amTrades += 1;
+    this.metrics.totalTradedNotional += notional;
+    this.recordExecutionCost(q.ticker, side, price, notional);
+    if (this.isAligned(q.ticker, side)) this.metrics.alignedNotional += notional;
 
+    const dealer = this.dealers.find((d) => d.id === q.dealerId);
+    if (dealer) dealer.fills += 1;
+    const dec = (v) => priceStr(v, inst.dp);
+    this.say('client', q.dealerId, `Done — you ${side === 'BUY' ? 'bought' : 'sold'} ${n.toLocaleString('en-US')} ${q.ticker} at ${dec(price)}.`, `${q.dealerName} · Dealer`);
     q.status = 'filled';
     q.fillSide = side;
-    q.fillQty = fillQty;
-    q.fillPrice = execPrice;
-    q.closedClock = fmtClock(this.totalSim);
+    q.fillQty = n;
+    q.fillPrice = dec(price);
+    q.closedClock = fmtClock(this.totalSim, this.clockScale);
+    this.oldQuotes.unshift({ ...q });
     this.liveQuotes.splice(idx, 1);
-    this.oldQuotes.unshift(q);
-
-    const d = this.dealers.find((x) => x.roomId === q.dealerRoom);
-    if (d) d.trades += 1;
-
-    this.say(
-      'me',
-      q.dealerRoom,
-      `${side === 'BUY' ? 'Mine (BUY)' : 'Yours (SELL)'} — ${fillQty.toLocaleString('en-US')} ${q.ticker} @ ${execPrice}`,
-      'You'
-    );
-    this.say('client', q.dealerRoom, `Confirmed! Pleasure doing business on ${q.ticker}.`, q.traderCode);
-    return { ok: true, price: execPrice, qty: fillQty };
+    return { ok: true, price: dec(price), qty: n };
   }
 
-  // --------------------------------------------------- Chat & @quote Parser
+  // -------------------------------------------------------------------- Chat
   chat(room, rawText) {
-    const text = String(rawText || '').slice(0, 260).trim();
-    if (!text) return { ok: false };
+    if (this.phase !== 'round') return { error: 'Round is not active' };
+    const text = String(rawText || '').trim().slice(0, 240);
+    if (!text) return null;
 
-    // Support AmplifyME @quote command directly in chat input:
-    // e.g. "@quote BP 54 56 50000 50000" or "@quote BP 54 56 50000"
-    if (text.toLowerCase().startsWith('@quote')) {
-      const parts = text.split(/[\s,]+/).slice(1);
-      if (parts.length >= 3) {
-        const [tk, b, o, bv = '25000', ov = bv, ttl = '45'] = parts;
-        const parseVol = (s) => (String(s).toLowerCase().endsWith('k') ? parseFloat(s) * 1000 : Number(s));
-        return this.sendQuote({
-          clientRoom: room,
-          ticker: tk,
-          bid: Number(b),
-          offer: Number(o),
-          bidVol: parseVol(bv),
-          offerVol: parseVol(ov),
-          validFor: Number(ttl) || 45,
-        });
-      }
-      return { error: 'Syntax: @quote TICKER BID OFFER BIDVOL [OFFERVOL]' };
-    }
-
-    // Support @rfq TICKER QTY in AM role:
-    if (text.toLowerCase().startsWith('@rfq')) {
-      const parts = text.split(/[\s,]+/).slice(1);
-      if (parts.length >= 2) {
-        const parseVol = (s) => (String(s).toLowerCase().endsWith('k') ? parseFloat(s) * 1000 : Number(s));
-        return this.requestQuote({
-          dealerRoom: this.dealers.some((d) => d.roomId === room) ? room : 'ALL',
-          ticker: parts[0],
-          qty: parseVol(parts[1]),
-        });
-      }
-      return { error: 'Syntax: @rfq TICKER VOLUME' };
-    }
+    const client = this.clients.find((c) => c.id === room);
+    const dealer = this.dealers.find((d) => d.id === room);
 
     this.say('me', room, text, 'You');
 
-    // Proactive Sales Outreach in IB role!
-    if (this.phase === 'round' && this.role === 'IB') {
-      const client = this.clients.find((c) => c.roomId === room);
-      if (client && this.totalSim - client.lastOutreachAt > 14) {
+    if (this.role === 'IB') {
+      if (client) {
         client.lastOutreachAt = this.totalSim;
-        this.metrics.proactiveSales += 1;
-        const upper = text.toUpperCase();
-        const mentionedTicker = Object.keys(this.inst).find((t) => upper.includes(t)) || null;
-        const hasOpen = this.clientRequests.some((r) => r.clientRoom === room && r.status === 'open');
-        if (!hasOpen && this.rng.chance(0.82)) {
-          this.pendingClientReplies.push({
-            dueAt: this.totalSim + this.rng.range(1.4, 3.0),
-            client,
-            ticker: mentionedTicker,
-          });
-        }
+        const mentioned = TICKERS.find((t) => text.toUpperCase().includes(t));
+        this.pendingClientReplies.push({
+          dueAt: this.totalSim + this.rng.range(1.4, 3.2),
+          clientId: client.id,
+          ticker: mentioned || null,
+          proactive: true,
+        });
+        this.metrics.proactiveReplies += 1;
+        return { ok: true };
       }
+      const tk = this.rng.pick(TICKERS);
+      this.pendingClientReplies.push({
+        dueAt: this.totalSim + this.rng.range(1.8, 3.8),
+        clientId: null,
+        ticker: tk,
+        proactive: false,
+        roomReply: room,
+      });
+      return { ok: true };
     }
 
-    // Natural AM chat RFQ parsing (e.g. "price in 50000 BP pls" in an IB dealer room)
-    if (this.phase === 'round' && this.role === 'AM') {
-      const dealer = this.dealers.find((d) => d.roomId === room);
-      if (dealer) {
-        const upper = text.toUpperCase();
-        const tk = Object.keys(this.inst).find((t) => upper.includes(t));
-        const mQty = text.match(/(\d+(?:\.\d+)?)\s*(k)?/i);
-        if (tk && mQty) {
-          const qv = mQty[2] ? Math.round( parseFloat(mQty[1]) * 1000 ) : Math.round(Number(mQty[1]));
-          if (qv >= 500 && qv <= 250000) {
-            this.pendingDealerQuotes.push({
-              dueAt: this.totalSim + this.rng.range(1.2, 2.4),
-              dealer,
-              ticker: tk,
-              qty: qv,
-            });
-          }
-        }
+    if (dealer) {
+      const tk = TICKERS.find((t) => text.toUpperCase().includes(t));
+      if (tk) {
+        const qty = this.parseQty(text, tk) || Math.round(2000000 / this.inst[tk].mid / 1000) * 1000;
+        const res = this.requestQuote({ dealerRoom: dealer.id, ticker: tk, qty, silent: true });
+        return res?.error ? res : { ok: true };
       }
+      this.pendingClientReplies.push({
+        dueAt: this.totalSim + this.rng.range(1.5, 3.0),
+        roomReply: dealer.id,
+        dealerId: dealer.id,
+        textReplay: true,
+      });
+      return { ok: true };
     }
 
-    // Deal room banter reply
-    if (room === 'deal' && this.rng.chance(0.55)) {
-      this.pendingReplyAt = this.totalSim + this.rng.range(1.8, 4.0);
+    // AM Room / Deal Room: a typed price request shops every dealer, exactly
+    // like "MSFT 10k pls" on the AmplifyME chat.
+    const tkLoose = TICKERS.find((t) => new RegExp(`\\b${t}\\b`, 'i').test(text));
+    if (tkLoose) {
+      const qty = this.parseQty(text, tkLoose) || Math.round(2000000 / this.inst[tkLoose].mid / 1000) * 1000;
+      const res = this.requestQuote({ dealerRoom: 'ALL', ticker: tkLoose, qty, silent: true });
+      return res?.error ? res : { ok: true };
     }
-    return { ok: true };
-  }
 
-  // Backward-compatible helpers for balance/playtest scripts
-  activeRfq() {
-    const r = this.clientRequests.find((x) => x.status === 'open');
-    if (!r) return null;
-    const alreadyQuoted = this.liveQuotes.some((q) => q.rfqId === r.id && q.status === 'live');
-    return {
-      ...r,
-      status: alreadyQuoted ? 'quoted' : 'open',
-      clientName: r.traderCode,
-    };
-  }
-
-  quoteRfq(rfqId, bid, offer, bidVol, offerVol, ttl) {
-    const req = this.clientRequests.find((r) => r.id === rfqId);
-    if (!req) return { error: 'Request not found' };
-    return this.sendQuote({
-      clientRoom: req.clientRoom,
-      ticker: req.ticker,
-      bid,
-      offer,
-      bidVol,
-      offerVol,
-      validFor: ttl,
-      rfqId,
+    this.pendingClientReplies.push({
+      dueAt: this.totalSim + this.rng.range(1.8, 3.6),
+      roomReply: room,
+      textReplay: true,
     });
-  }
-
-  passRfq(rfqId) {
-    const req = this.clientRequests.find((r) => r.id === rfqId && r.status === 'open');
-    if (!req) return { error: 'Nothing to pass' };
-    req.status = 'passed';
-    this.metrics.passes += 1;
     return { ok: true };
   }
 
-  // ------------------------------------------------------------------ Market
-  updatePrices(dt) {
-    for (const t of Object.keys(this.inst)) {
-      const i = this.inst[t];
-      const k = BALANCE.priceConvergence;
-      i.logV += (i.logTarget - i.logV) * (1 - Math.exp(-k * dt));
-      i.logV += i.vol * Math.sqrt(dt) * this.rng.gauss() * 0.85;
-      const prev = i.mid;
-      i.mid = Math.exp(i.logV);
-      if (Math.abs(i.mid - prev) > 1e-6) {
-        i.dir = i.mid >= prev ? 1 : -1;
-      }
-      i.last = i.mid;
-      i.bid = i.mid * (1 - BALANCE.exchangeBaseHalfSpread);
-      i.offer = i.mid * (1 + BALANCE.exchangeBaseHalfSpread);
-      i.chg = i.mid - i.open;
-      i.chgPct = (i.mid / i.open - 1) * 100;
-    }
-    this.hedgeCooldown = Math.max(0, this.hedgeCooldown - dt);
-
-    // Track peak P&L & drawdown
-    const cur = this.roundTotalPnl();
-    if (cur > this.metrics.peakPnl) this.metrics.peakPnl = cur;
-    const dd = this.metrics.peakPnl - cur;
-    if (dd > this.metrics.maxDrawdown) this.metrics.maxDrawdown = dd;
+  parseQty(text, ticker) {
+    const cleaned = text.toUpperCase().replace(ticker, ' ');
+    const m = cleaned.match(/(\d+(?:[.,]\d+)?)\s*(K|M)?/);
+    if (!m) return null;
+    let n = Number(m[1].replace(',', '.'));
+    if (m[2] === 'K') n *= 1000;
+    else if (m[2] === 'M') n *= 1000000;
+    else if (n < 1000) n *= 1000; // "MSFT 10" → 10k
+    return clamp(Math.round(n), 100, 500000);
   }
 
-  updateCandles() {
-    const bucket = Math.floor(this.simTime);
-    for (const t of Object.keys(this.inst)) {
-      const i = this.inst[t];
-      const dec = i.ref >= 100 ? r2 : r3;
-      const arr = this.candles[t];
-      const last = arr[arr.length - 1];
-      const px = dec(i.mid);
-      if (!last || last[0] !== bucket) {
-        const vol = Math.round(22000 + this.rng.next() * 55000);
-        arr.push([bucket, px, px, px, px, vol]);
-        if (arr.length > 720) arr.shift();
+  processClientReplies() {
+    const keep = [];
+    for (const p of this.pendingClientReplies) {
+      if (this.totalSim < p.dueAt) { keep.push(p); continue; }
+      if (p.clientId) {
+        const c = this.clients.find((x) => x.id === p.clientId);
+        if (c) {
+          this.spawnClientRfq({ client: c, ticker: p.ticker, proactive: true });
+          if (p.proactive) this.metrics.proactiveConversions += 1;
+        }
+      } else if (p.dealerId) {
+        const d = this.dealers.find((x) => x.id === p.dealerId);
+        if (d) {
+          const tk = this.rng.pick(d.specialty);
+          this.say('client', d.id, this.rng.pick(DEALER_CHATTER).replaceAll('{t}', tk), `${d.name} · Dealer`);
+        }
+      } else if (p.roomReply === 'deal') {
+        this.say('desk', 'deal', this.rng.pick(DEAL_ROOM_LINES).replaceAll('{t}', this.rng.pick(TICKERS)));
+      } else if (p.roomReply === 'ib' || p.roomReply === 'am') {
+        this.say('desk', p.roomReply, 'Copy that — desk is watching the tape.', this.rng.pick(DESK_TRADERS));
       } else {
-        last[2] = Math.max(last[2], px);
-        last[3] = Math.min(last[3], px);
-        last[4] = px;
-        last[5] += Math.round(this.rng.next() * 1400);
+        this.say('desk', p.roomReply, this.rng.pick(AM_ROOM_LINES), 'Desk chatter');
       }
     }
+    this.pendingClientReplies = keep;
   }
 
-  // ------------------------------------------------------------------- News
-  scheduleRoundNews() {
-    const rng = this.rng;
-    const items = [];
-    const nMacro = Math.max(2, Math.round(this.roundSeconds / 140));
-    const nStock = Math.max(4, Math.round(this.roundSeconds / 55));
+  // -------------------------------------------------------------------- News
+  buildSchedule() {
+    const base = this.mode === 'replay'
+      ? (this.round === 1 ? OFFICIAL_ROUND_1 : OFFICIAL_ROUND_2)
+      : null;
 
-    const availStock = STOCK_NEWS.filter((_, idx) => !this.usedStockNews.has(idx));
-    const poolS = availStock.length >= nStock ? [...availStock] : [...STOCK_NEWS];
-    for (let k = 0; k < Math.min(nStock, poolS.length); k++) {
-      const idx = Math.floor(rng.next() * poolS.length);
-      const picked = poolS.splice(idx, 1)[0];
-      const origIdx = STOCK_NEWS.indexOf(picked);
-      if (origIdx >= 0) this.usedStockNews.add(origIdx);
-      items.push({ kind: 'STOCK', ...picked, at: 0 });
+    let items = [];
+    if (base) {
+      const fracs = base.length >= 10
+        ? [0.004, 0.11, 0.18, 0.25, 0.32, 0.39, 0.5, 0.58, 0.66, 0.74, 0.86, 0.94]
+        : [0.02, 0.2, 0.38, 0.55, 0.72, 0.88];
+      items = base.map((n, i) => ({
+        ...n,
+        at: Math.round(this.roundSeconds * (fracs[i] ?? (0.1 + (0.85 * i) / base.length)) * 10) / 10,
+      }));
+    } else {
+      const count = clamp(Math.round(this.roundSeconds / 75), 5, 15);
+      const pool = [...ALL_NEWS];
+      const picked = [];
+      // guarantee at least 2 macro and 3 single stocks for a balanced wire
+      const pickOne = (filter) => {
+        const idxs = pool.map((n, i) => (filter(n) ? i : -1)).filter((i) => i >= 0);
+        if (!idxs.length) return;
+        const i = idxs[Math.floor(this.rng.next() * idxs.length)];
+        picked.push(pool.splice(i, 1)[0]);
+      };
+      pickOne((n) => n.kind === 'MACRO');
+      pickOne((n) => n.kind === 'MACRO');
+      pickOne((n) => n.kind === 'STOCK');
+      pickOne((n) => n.kind === 'STOCK');
+      pickOne((n) => n.kind === 'STOCK');
+      while (picked.length < count && pool.length) {
+        const i = Math.floor(this.rng.next() * pool.length);
+        picked.push(pool.splice(i, 1)[0]);
+      }
+      const noteAt = 0.5;
+      picked.sort(() => this.rng.next() - 0.5);
+      const usable = picked.slice(0, count - 1);
+      items = usable.map((n, i) => ({
+        ...n,
+        at: Math.round(this.roundSeconds * (0.06 + (0.86 * i) / Math.max(1, usable.length - 1)) * 10) / 10,
+      }));
+      items.push({
+        kind: 'NOTE', ticker: 'NOTE', tone: 0, halfway: true,
+        headline: `NOTE: We are now half way through Round ${this.round}, there are ${Math.round(this.roundSeconds / 120)} minutes left of trading`,
+        moves: {},
+        hint: 'Moitié du round : coupez les expositions non voulues.',
+        at: Math.round(this.roundSeconds * noteAt * 10) / 10,
+      });
     }
-
-    const availMacro = MACRO_NEWS.filter((_, idx) => !this.usedMacroNews.has(idx));
-    const poolM = availMacro.length >= nMacro ? [...availMacro] : [...MACRO_NEWS];
-    for (let k = 0; k < Math.min(nMacro, poolM.length); k++) {
-      const idx = Math.floor(rng.next() * poolM.length);
-      const picked = poolM.splice(idx, 1)[0];
-      const origIdx = MACRO_NEWS.indexOf(picked);
-      if (origIdx >= 0) this.usedMacroNews.add(origIdx);
-      items.push({ kind: 'MACRO', ...picked, at: 0 });
-    }
-
-    const slots = items.length;
-    const first = 9;
-    const lastAt = Math.max(30, this.roundSeconds - 28);
-    items.forEach((it, idx) => {
-      it.at = Math.round((first + ((lastAt - first) * idx) / Math.max(1, slots - 1) + rng.range(-4, 4)) * 10) / 10;
-      it.at = Math.max(6, Math.min(this.roundSeconds - 16, it.at));
-    });
     items.sort((a, b) => a.at - b.at);
-    this.pendingNews = items.map((it, idx) => ({
-      ...it,
-      id: `n${this.round}-${idx}`,
-      fired: false,
-      round: this.round,
-    }));
+    this.pendingNews = items.map((n, i) => ({ ...n, id: `n${this.round}-${i}`, fired: false, round: this.round }));
   }
 
   fireNews(n) {
     n.fired = true;
-    if (n.kind === 'STOCK') {
-      const i = this.inst[n.ticker];
-      i.logTarget += n.move;
-      this.news.unshift({
-        id: n.id,
-        at: this.round,
-        simAt: this.totalSim,
-        kind: 'STOCK',
-        ticker: n.ticker,
-        headline: n.headline,
-        detail: n.detail,
-        frHint: n.frHint,
-        time: fmtClock(this.totalSim),
-        impact: n.move,
-      });
-      this.say('system', 'ib', `BREAKING [${n.ticker}] — ${n.headline}`, 'NEWSWIRE');
-      // Surge client RFQ interest right after stock news in IB mode!
-      if (this.role === 'IB') {
-        this.nextRfqAt = Math.min(this.nextRfqAt, this.totalSim + this.rng.range(1.5, 3.2));
-      }
-    } else {
-      const moves = {};
-      for (const t of Object.keys(this.inst)) {
-        const i = this.inst[t];
-        const boost = n.sectorBoost?.[i.sector] ?? 1.0;
-        const m = n.tone * n.size * i.beta * boost;
-        i.logTarget += m;
-        moves[t] = m;
-      }
-      this.news.unshift({
-        id: n.id,
-        at: this.round,
-        simAt: this.totalSim,
-        kind: 'MACRO',
-        ticker: 'MACRO',
-        headline: n.headline,
-        detail: n.detail,
-        frHint: n.frHint,
-        time: fmtClock(this.totalSim),
-        impact: n.tone * n.size,
-        moves,
-      });
-      this.say('system', 'ib', `MACRO FLASH — ${n.headline}`, 'NEWSWIRE');
-      if (this.role === 'IB') {
-        this.nextRfqAt = Math.min(this.nextRfqAt, this.totalSim + this.rng.range(1.8, 3.5));
-      }
+    if (n.kind === 'NOTE') {
+      this.postNote(n.headline, n.hint);
+      this.say('system', this.newsRoom(), n.headline, 'NEWSWIRE');
+      this.emitEvent('news', { ticker: 'NOTE' });
+      return;
     }
-    if (this.news.length > 28) this.news.pop();
+    const rawMoves = n.moves || {};
+    const scale = BALANCE.newsImpactScale;
+    const impactMap = {};
+    for (const t of TICKERS) {
+      const mv = (Number(rawMoves[t]) || 0) * scale;
+      impactMap[t] = mv;
+      if (!mv) continue;
+      this.inst[t].logTarget += mv;
+      this.newsSignal[t] += mv;
+    }
+    const macroImpact = n.kind === 'MACRO'
+      ? TICKERS.reduce((a, t) => a + (impactMap[t] || 0), 0) / TICKERS.length
+      : 0;
+    if (macroImpact) this.macroSignal += macroImpact;
 
-    const hotTicker = n.kind === 'STOCK' ? n.ticker : this.rng.pick(Object.keys(this.inst));
-    this.say('desk', 'deal', `Headline out on ${n.kind === 'STOCK' ? hotTicker : 'MACRO'}! Watch live quotes and ${hotTicker} depth.`);
+    this.news.unshift({
+      id: n.id,
+      at: this.round,
+      simAt: Math.round(this.totalSim * 10) / 10,
+      kind: n.kind,
+      ticker: n.kind === 'MACRO' ? 'MACRO' : n.ticker,
+      headline: n.headline,
+      hint: n.hint,
+      time: fmtClock(this.totalSim, this.clockScale),
+      impact: n.tone * (macroImpact || Math.abs(impactMap[n.ticker] || 0)),
+      moves: impactMap,
+    });
+    if (this.news.length > 40) this.news.pop();
+
+    this.say('system', this.newsRoom(), `BREAKING — ${n.headline}`, 'NEWSWIRE');
+    this.emitEvent('news', { ticker: n.kind === 'MACRO' ? 'MACRO' : n.ticker });
+
+    if (this.role === 'IB') {
+      this.nextRfqAt = Math.min(this.nextRfqAt, this.totalSim + this.rng.range(1.2, 2.8));
+    }
   }
 
   // ------------------------------------------------------------------ Rounds
@@ -1467,129 +1498,81 @@ export class Session {
     this.round += 1;
     this.role = this.roleForRound(this.round);
     this.phase = 'round';
+    this.debrief = this.debrief ? { ...this.debrief, open: false } : null;
     this.simTime = 0;
     this.totalSim = 0;
     this.roundStartSim = 0;
-    this.oneMinWarned = false;
-
-    // Reset per-round book cleanly so IB and AM roles have crisp accounting
-    this.realized = 0;
-    this.ibCommissionEarned = 0;
-    this.exchangeFeesPaid = 0;
-    this.amCommPaid = 0;
-    this.blotter = [];
-    this.liveQuotes = [];
-    this.oldQuotes = [];
-    this.clientRequests = [];
-    this.pendingDealerQuotes = [];
-    this.pendingClientReplies = [];
-    this.news = [];
-    this.messages = [];
-
-    this.initMetrics();
+    this.breakTime = 0;
+    this.resetRoundState();
+    this.usedNewsClear();
     this.initMarket(this.round === 1);
-    this.scheduleRoundNews();
+    this.buildSchedule();
+    this.nextRfqAt = this.rng.range(3, 5);
+    this.nextChatterAt = this.rng.range(8, 14);
 
-    this.nextRfqAt = this.rng.range(3.0, 5.5);
-    this.nextChatterAt = this.rng.range(8, 15);
-
-    const roleTitle = this.role === 'IB'
-      ? 'Investment Bank Trader (IB 1 — Market Making & Sales)'
-      : 'Asset Manager (AM 1 — $20,000,000 Equity Portfolio)';
-
+    const title = this.role === 'IB'
+      ? 'Investment Bank — Market Maker Sell-Side (IB-55)'
+      : 'Asset Manager — $20,000,000 Fund (AM-55)';
     this.postNote(
-      `Round ${this.round} of the simulation has started — Active Role: ${roleTitle}`,
+      `Round ${this.round} of the simulation has started — Active role: ${title}`,
       this.role === 'IB'
-        ? 'Quote two-way prices to HF & AM clients in Chat, earn client commissions, pull stale quotes on news, and unwind inventory risk in clips on the Exchange.'
-        : 'Deploy your $20,000,000 fund across equities in response to breaking MACRO and STOCK headlines. Request tight block quotes from IB 1–3 or execute urgent clips on the Exchange.'
+        ? 'Quote two-way prices to AM / HF clients, earn commissions, pull stale quotes on breaking news and unwind inventory in clips on the Exchange.'
+        : 'Deploy the $20,000,000 mandate across the 5 equities, shop dealer quotes from IB-2 → IB-57 and keep a healthy cash buffer.',
     );
-    this.say('system', 'ib', `ROUND ${this.round}/${this.roundsTotal} LIVE — Role: ${roleTitle}.`, 'AMPLIFY-HOST');
+    this.say('system', this.newsRoom(), `ROUND ${this.round}/${this.roundsTotal} LIVE — ${title}`, 'AMPLIFY-HOST');
 
     if (this.role === 'IB') {
-      // Initial friendly greeting from HF1-1 so user immediately sees where client flow happens
-      this.say('client', 'hf1test1', 'Hi desk — let me know when you are ready to show prices.', 'HF1-1');
+      this.say('client', this.clients[0].id, 'Hi desk — let me know when you are ready to show prices.', `${this.clients[0].name} · ${this.clients[0].team}`);
+      this.say('desk', 'deal', 'Morning all, flow desk is open. Watch the wire for headline risk.', 'FLOW-DESK');
     } else {
-      this.say('client', 'ib1test1', 'Morning! IB 1 desk open — send RFQs any time for tight block pricing.', 'IB1-1');
-      this.say('client', 'ib2test1', 'IB 2 standing by for Banks & Energy block flow.', 'IB2-1');
+      this.say('client', this.dealers[0].id, 'IB-2 desk open — send your RFQs, tight markets on MSFT and BABA.', 'IB-2 · Dealer');
+      this.say('desk', 'am', 'Morning — remember to shop at least three dealers before hitting the Exchange.', 'AM-28');
     }
+    this.emitEvent('round', { round: this.round, role: this.role });
   }
 
-  closeAllPositionsAtEnd() {
-    for (const t of Object.keys(this.positions)) {
-      const p = this.positions[t];
-      if (p.qty === 0) continue;
-      const i = this.inst[t];
-      const side = p.qty > 0 ? 'SELL' : 'BUY';
-      const qty = Math.abs(p.qty);
-      const dq = this.depthQuote(t, qty);
-      const execPrice = side === 'SELL' ? dq.sellPrice : dq.buyPrice;
-      this.applyFill(t, side === 'SELL' ? -qty : qty, execPrice, dq.commission, 'EOD_CLOSE', {
-        client: 'AUTO-CLOSE',
-        venue: 'EOD',
-      });
-    }
+  usedNewsClear() {
+    this.usedNews = new Set();
   }
 
   endRound() {
-    // Settle any remaining markouts & close open positions at end of round
-    this.closeAllPositionsAtEnd();
     for (const q of this.liveQuotes) {
       q.status = 'expired';
-      q.closedClock = fmtClock(this.totalSim);
-      this.oldQuotes.unshift(q);
+      q.closedClock = fmtClock(this.totalSim, this.clockScale);
+      this.oldQuotes.unshift({ ...q });
     }
     this.liveQuotes = [];
-    for (const r of this.clientRequests) {
-      if (r.status === 'open') r.status = 'expired';
-    }
+    for (const r of this.clientRequests) if (r.status === 'open') r.status = 'expired';
+    this.pendingDealerQuotes = [];
+    this.pendingClientReplies = [];
 
     this.postNote(`Round ${this.round} of the simulation has now ended`);
     this.phase = 'break';
 
-    const roundPnl = Math.round(this.roundTotalPnl());
-    const commDisplay = this.roundCommissionDisplay();
+    const pnl = Math.round(this.roundTotalPnl());
     const scoreObj = this.computeRoleScore();
-
     const record = {
       round: this.round,
       role: this.role,
-      pnl: roundPnl,
+      pnl,
       realized: Math.round(this.realized),
-      commission: commDisplay,
-      fills: this.metrics.rfqFills + this.metrics.amIbBlocks,
-      exchangeTrades: this.metrics.exchangeTrades,
+      commission: this.commissionDisplay(),
+      fills: this.metrics.clientFills + this.metrics.amTrades,
+      exchangeTrades: this.metrics.exchangeTrades + this.metrics.amExchangeTrades,
       quotes: this.metrics.quotesSent,
-      capture: Math.round(this.metrics.spreadCapture),
-      adverse: Math.round(this.metrics.adverse),
       fatFingers: this.metrics.fatFingers,
-      staleSniped: this.metrics.staleSniped,
-      proactiveConversions: this.metrics.proactiveConversions,
+      clientFills: this.metrics.clientFills,
+      clientNotional: Math.round(this.metrics.clientNotional),
+      cash: Math.round(this.cash),
+      portfolioValue: Math.round(this.portfolioValue()),
+      maxWeight: Math.round(this.maxPositionWeightPct()),
       scoreObj,
-      total: Math.round(this.roundHistory.reduce((a, r) => a + r.pnl, 0) + roundPnl),
+      total: Math.round(this.roundHistory.reduce((a, r) => a + r.pnl, 0) + pnl),
     };
     this.roundHistory.push(record);
     this.roundStats = record;
 
-    const revealClients = this.role === 'IB'
-      ? this.clients.map((c) => ({
-          name: c.traderCode,
-          team: c.team,
-          label: c.label,
-          trades: c.trades,
-          informedTrades: c.informedTrades,
-          note: c.note,
-        }))
-      : this.dealers.map((d) => ({
-          name: d.traderCode,
-          team: d.team,
-          label: `Specialty: ${d.specialty.join(', ')}`,
-          trades: d.trades,
-          informedTrades: 0,
-          note: d.note,
-        }));
-
     const nextRole = this.round < this.roundsTotal ? this.roleForRound(this.round + 1) : null;
-
     this.debrief = {
       open: true,
       round: this.round,
@@ -1597,34 +1580,29 @@ export class Session {
       nextRole,
       stats: record,
       scoreObj,
-      clients: revealClients,
+      clients: (this.role === 'IB' ? this.clients : this.dealers).map((c) => ({
+        name: c.name,
+        team: c.team,
+        trades: c.trades,
+        note: c.note,
+      })),
       tips: this.buildTips(),
     };
 
-    if (this.round >= this.roundsTotal) {
-      this.finish();
-    }
+    if (this.round >= this.roundsTotal) this.finish();
   }
 
   finish() {
     this.phase = 'done';
     const lb = this.leaderboard();
     const totalPnl = this.roundHistory.reduce((a, r) => a + r.pnl, 0);
-    const totalComm = this.roundHistory.reduce((a, r) => a + r.commission, 0);
-    const totalFfc = this.roundHistory.reduce((a, r) => a + r.fatFingers, 0);
-    const totalTrades = this.roundHistory.reduce((a, r) => a + r.fills + r.exchangeTrades, 0);
-    const totalQuotes = this.roundHistory.reduce((a, r) => a + r.quotes, 0);
-
     this.final = {
       pnl: Math.round(totalPnl),
-      commission: Math.round(totalComm),
-      fatFingers: totalFfc,
       score: lb.myScore,
       rank: lb.rank,
       total: lb.total,
       topPct: lb.topPct,
-      trades: totalTrades,
-      quotes: totalQuotes,
+      fatFingers: this.roundHistory.reduce((a, r) => a + r.fatFingers, 0),
       rounds: this.roundHistory,
       tips: this.buildTips(),
     };
@@ -1633,166 +1611,175 @@ export class Session {
   buildTips() {
     const m = this.metrics;
     const tips = [];
+    const score = this.computeRoleScore();
+    const g = Object.fromEntries(score.gauges.map((x) => [x.code, x.score]));
+
     if (m.fatFingers > 0) {
-      tips.push({
-        tone: 'bad',
-        text: `Fat Finger Count = ${m.fatFingers}. Sur AmplifyME, chaque erreur de saisie (bid >= offer, zéro en trop, volume hors limite) pénalise directement votre score de qualification Top 10 %.`,
-      });
+      tips.push({ tone: 'bad', text: `FFC = ${m.fatFingers}. Chaque erreur de saisie (bid ≥ offer, taille aberrante, prix hors marché) coûte 25 points sur la jauge FFC.` });
     }
     if (this.role === 'IB') {
-      if (m.staleSniped > 0) {
-        tips.push({
-          tone: 'bad',
-          text: `${m.staleSniped} quote(s) laissée(s) active(s) dans LIVE CHAT QUOTES ont été « snipées » après une news. Annulez (✕) toujours vos quotes ouvertes dès qu'un titre bouge !`,
-        });
-      }
-      if (m.rfqFills < 5) {
-        tips.push({
-          tone: 'warn',
-          text: `Seulement ${m.rfqFills} trades clients exécutés : relancez les clients dans le Chat (« seen the news in BP? need a price? ») et cotez un spread plus compétitif que l'Exchange (~0,5 % à 0,9 %) pour engranger les commissions IB !`,
-        });
-      }
-      if (m.oversizedExchangeDumps > 0) {
-        tips.push({
-          tone: 'warn',
-          text: `Vous avez débouclé ${m.oversizedExchangeDumps} gros bloc(s) d'un seul coup sur l'Exchange : la profondeur de marché élargit le spread ! Débouclez par tranches de 10k–15k titres.`,
-        });
-      }
-      if (m.proactiveConversions > 0) {
-        tips.push({
-          tone: 'good',
-          text: `Excellent Sales Trading : ${m.proactiveConversions} trade(s) généré(s) grâce à vos messages proactifs aux clients dans le Chat.`,
-        });
-      }
+      if (g.COMM < 60) tips.push({ tone: 'warn', text: 'COMM sous 60 % : vous n’avez pas assez coté le flux client. Répondez à chaque RFQ et relancez les clients dans le chat.' });
+      if (g.SSRM < 60) tips.push({ tone: 'warn', text: `SSRM à ${g.SSRM} % : votre spread moyen est trop large (ou trop fin) autour du REFPRICE. Visez une demi-fourchette de 20–80 bps autour du REFPRICE et coupez les quotes avant chaque news.` });
+      if (g.ETM < 60) tips.push({ tone: 'warn', text: `ETM à ${g.ETM} % : vous avez laissé une exposition nette non couverte ($${Math.round(this.netNotional()).toLocaleString('en-US')}). Débouclez en clips de 10k–15k sur l’Exchange.` });
+      if (g.CT < 60) tips.push({ tone: 'warn', text: `CT à ${g.CT} % : ${m.clientFills} trades clients seulement. Priorisez les demandes de 25k–50k et affichez des volumes suffisants.` });
+      if (m.staleSniped > 0) tips.push({ tone: 'bad', text: `${m.staleSniped} quote(s) snipée(s) sur news. Annulez systématiquement vos LIVE CHAT QUOTES dès qu’une dépêche rouge tombe.` });
+      if (g.PnL >= 70) tips.push({ tone: 'good', text: `P&L solide ($${Math.round(score.pnl).toLocaleString('en-US')}) : conservez le même rythme de cotation et de couverture.` });
     } else {
-      const roi = (this.roundTotalPnl() / BALANCE.amFundCapital) * 100;
-      if (m.maxDiversifiedCount < 3) {
-        tips.push({
-          tone: 'warn',
-          text: `Portefeuille trop concentré (${m.maxDiversifiedCount} ligne(s) significative(s)). Sur le mandat 20 M$ AmplifyME, répartissez le risque sur 3 à 5 actions (long sur les catalyseurs positifs, short sur les négatifs).`,
-        });
-      }
-      if (m.amExchangeBlocks > m.amIbBlocks && m.amExchangeBlocks >= 2) {
-        tips.push({
-          tone: 'info',
-          text: `Pour les blocs > 2 M$, demandez un prix aux banques (IB 1 / IB 2 / IB 3) plutôt que de taper l'Exchange : vous économisez plus de 50 % de spread d'impact !`,
-        });
-      }
-      if (roi >= 3.5) {
-        tips.push({
-          tone: 'good',
-          text: `Performance solide (+${roi.toFixed(2)} % sur le fonds de 20 M$) : excellente réactivité aux annonces MACRO et micro.`,
-        });
-      }
+      if (g.BSRM < 60) tips.push({ tone: 'warn', text: `BSRM à ${g.BSRM} % : cash ${(this.cash / Math.max(1, this.portfolioValue()) * 100).toFixed(1)} %, max ${this.maxPositionWeightPct().toFixed(0)} % sur une ligne. Gardez 5–15 % de cash et 5–15 % par valeur.` });
+      if (g.ES < 60) tips.push({ tone: 'warn', text: `ES à ${g.ES} % : exécutez via les quotes dealers (IB-2…IB-57) plutôt que l’Exchange et comparez au moins 3 banques.` });
+      if (g.RA < 60) tips.push({ tone: 'warn', text: `RA à ${g.RA} % : votre exposition n’est pas alignée avec les news. Traitez chaque dépêche dans le bon sens et gardez 60–110 % d’exposition brute.` });
+      if (g.ROI < 60) tips.push({ tone: 'warn', text: `ROI à ${g.ROI} % : le mandat doit générer au moins +1,5 % ($300k). Prenez du risque sur les catalyseurs macro et micro.` });
+      if (g.BSRM >= 75 && g.ROI >= 60) tips.push({ tone: 'good', text: 'Excellent équilibre risque / performance : c’est le profil Top 1 %. Maintiens cette discipline sur le second round.' });
     }
-
     if (!tips.length) {
-      tips.push({
-        tone: 'good',
-        text: 'Exécution propre : 0 Fat Finger, bon contrôle du risque et lecture cohérente du flux d’actualités.',
-      });
+      tips.push({ tone: 'good', text: 'Exécution propre, zéro fat finger, risque maîtrisé. Continuez comme ça pour sécuriser le Top 1 %.' });
     }
-    return tips.slice(0, 4);
+    return tips.slice(0, 5);
   }
 
   liveTips() {
     const tips = [];
     const m = this.metrics;
-    if (m.fatFingers > 0) {
-      tips.push({ tone: 'bad', text: `Attention : ${m.fatFingers} Fat Finger enregistré(s). Vérifiez toujours le RefPrice avant SEND QUOTE.` });
-    }
     if (this.role === 'IB') {
       const stale = this.liveQuotes.filter((q) => {
-        const mid = this.inst[q.ticker]?.mid ?? 0;
-        return mid > q.offer * 0.998 || mid < q.bid * 1.002;
+        const mid = this.inst[q.ticker]?.mid || 0;
+        return mid > q.offer * 1.002 || mid < q.bid * 0.998;
       });
-      if (stale.length) {
-        tips.push({ tone: 'bad', text: `URGENT : votre quote live sur ${stale[0].ticker} est proche/franchie par le marché ! Annulez-la (✕) dans LIVE CHAT QUOTES.` });
-      }
-      const bigPos = Object.keys(this.positions).find((t) => Math.abs(this.positions[t].qty * this.inst[t].mid) > 4500000);
-      if (bigPos) {
-        tips.push({ tone: 'warn', text: `Inventaire élevé sur ${bigPos} : débouclez par clips de 10k sur EXCHANGE ou biaisez (skew) votre prochaine quote.` });
-      }
+      if (stale.length) tips.push({ tone: 'bad', text: `URGENT : quote live sur ${stale[0].ticker} franchie par le marché — annulez-la (✕) immédiatement.` });
+      if (Math.abs(this.netNotional()) > 3000000) tips.push({ tone: 'warn', text: `Exposition nette $${Math.round(this.netNotional()).toLocaleString('en-US')} : débouclez par clips de 10k sur l’Exchange pour protéger ETM.` });
+      if (m.clientFills < 4 && this.simTime > this.roundSeconds * 0.35) tips.push({ tone: 'info', text: 'Répondez à chaque RFQ et relancez les clients : les commissions (COMM) et le volume (CT) pèsent 32 % du score IB.' });
+      if (m.quoteSpreadCount && m.quoteSpreadSum / m.quoteSpreadCount > 120) tips.push({ tone: 'warn', text: 'Spread moyen trop large : visez une demi-fourchette de 20–80 bps autour du REFPRICE (SSRM).' });
     } else {
-      if (this.grossNotional() < 4000000 && this.simTime > 35) {
-        tips.push({ tone: 'info', text: `Seulement ${(this.grossNotional() / 1e6).toFixed(1)} M$ déployés sur vos 20 M$ : exploitez les news en Long/Short via IB Quotes !` });
-      }
+      if (this.cash / Math.max(1, this.portfolioValue()) < 0.05 && this.simTime > this.roundSeconds * 0.4) tips.push({ tone: 'bad', text: 'Cash quasi nul : le BSRM chute. Vendez une ligne pour reconstituer 5–15 % de réserve.' });
+      if (this.maxPositionWeightPct() > 30) tips.push({ tone: 'warn', text: `Concentration ${this.maxPositionWeightPct().toFixed(0)} % sur une ligne : réduisez à 5–15 % par valeur.` });
+      if (this.metrics.amExchangeTrades > this.metrics.amDealerTrades && this.metrics.amExchangeTrades >= 2) tips.push({ tone: 'warn', text: 'Vous passez trop par l’Exchange : shoppez les banques IB-2 → IB-57 pour un meilleur prix (ES).' });
+      if (this.grossNotional() < 6000000 && this.simTime > this.roundSeconds * 0.3) tips.push({ tone: 'info', text: 'Capital sous-déployé : visez 60–100 % d’exposition brute sur les catalyseurs.' });
+      if (m.amDealerTrades >= 3 && this.metrics.execNotionalSum > 0 && this.metrics.execCostSum / this.metrics.execNotionalSum < 25) tips.push({ tone: 'good', text: 'Exécution serrée face au REFPRICE — continuez la mise en concurrence des dealers.' });
     }
-    if (this.assistMode && this.news[0]?.frHint && this.news[0].kind !== 'NOTE') {
-      tips.push({ tone: 'info', text: `Lecture News [${this.news[0].ticker}] : ${this.news[0].frHint}` });
+    if (this.assistMode && this.news[0]?.hint && this.news[0].kind !== 'NOTE') {
+      tips.push({ tone: 'info', text: `Lecture news : ${this.news[0].hint}` });
     }
     return tips.slice(0, 3);
   }
 
-  // --------------------------------------------------------------- Main Tick
+  // -------------------------------------------------------------------- Tick
   step(dt) {
-    if (this.phase !== 'round' && this.phase !== 'break') return;
+    if (this.phase !== 'round') return;
+    this.simTime += dt;
+    this.totalSim += dt;
+    if (this.hedgeCooldown > 0) this.hedgeCooldown = Math.max(0, this.hedgeCooldown - dt);
 
-    if (this.phase === 'round') {
-      this.simTime += dt;
-      this.totalSim += dt;
+    const left = this.roundSeconds - this.simTime;
+    if (!this.oneMinWarned && left <= 60 && this.roundSeconds >= 150) {
+      this.oneMinWarned = true;
+      this.postNote('NOTE: There is one minute left until the end of the simulation');
+      this.say('system', this.newsRoom(), `1 MINUTE REMAINING in Round ${this.round} — manage open risk before the close!`, 'AMPLIFY-HOST');
+      this.emitEvent('alert', { kind: 'minute' });
+    }
 
-      // 1-minute left official AmplifyME NOTE
-      const left = this.roundSeconds - this.simTime;
-      if (!this.oneMinWarned && left <= 60 && this.roundSeconds >= 90) {
-        this.oneMinWarned = true;
-        this.postNote(`There is one minute left until the end of Round ${this.round} of the simulation`);
-        this.say('system', 'ib', `1 MINUTE REMAINING in Round ${this.round} — manage open risk before close!`, 'AMPLIFY-HOST');
+    for (const n of this.pendingNews) {
+      if (!n.fired && this.simTime >= n.at) this.fireNews(n);
+    }
+
+    this.processClientReplies();
+
+    if (this.role === 'IB' && this.totalSim >= this.nextRfqAt) {
+      this.spawnClientRfq();
+      const target = clamp(Math.sqrt(this.roundSeconds) * 0.92, 8, 42);
+      this.nextRfqAt = this.totalSim + this.rng.range(target * 0.72, target * 1.28);
+    }
+
+    this.updatePrices(dt);
+    this.updateCandles();
+
+    if (this.role === 'IB') this.evaluateIbQuotes();
+    else this.processDealerReplies();
+
+    if (this.totalSim >= this.nextChatterAt) {
+      this.nextChatterAt = this.totalSim + this.rng.range(BALANCE.chatterMin, BALANCE.chatterMax);
+      const tk = this.rng.pick(TICKERS);
+      if (this.role === 'IB') {
+        this.say('desk', 'deal', this.rng.pick(DEAL_ROOM_LINES).replaceAll('{t}', tk));
+      } else {
+        this.say('desk', 'am', this.rng.pick(AM_ROOM_LINES), `AM-${this.rng.int(2, 41)}`);
+        const d = this.rng.pick(this.dealers);
+        this.say('client', d.id, this.rng.pick(DEALER_CHATTER).replaceAll('{t}', tk), `${d.name} · Dealer`);
       }
+    }
 
-      // Fire scheduled news
-      for (const n of this.pendingNews) {
-        if (!n.fired && this.simTime >= n.at) this.fireNews(n);
+    // Risk / behaviour sampling once per simulated second
+    if (this.totalSim - this.lastSampleAt >= 1) {
+      this.lastSampleAt = this.totalSim;
+      const m = this.metrics;
+      const net = Math.abs(this.netNotional());
+      m.netSamples += 1;
+      if (net > 3000000) m.netOverSamples += 1;
+      m.netPeak = Math.max(m.netPeak, net);
+      m.grossPeak = Math.max(m.grossPeak, this.grossNotional());
+      if (this.role === 'IB' && net > 4500000 && !m.netAlerted) {
+        m.netAlerted = true;
+        this.emitEvent('alert', { kind: 'exposure' });
+        this.say('system', 'ib', `RISK ALERT — net exposure $${Math.round(net).toLocaleString('en-US')} above $4.5M limit. Hedge in clips.`, 'RISK-MGR');
       }
-
-      // Proactive sales replies in IB mode
-      const keepReplies = [];
-      for (const pr of this.pendingClientReplies) {
-        if (this.totalSim >= pr.dueAt) {
-          this.spawnClientRfq(pr.client, pr.ticker, true);
-        } else {
-          keepReplies.push(pr);
+      if (this.role === 'AM') {
+        const pv = Math.max(1, this.portfolioValue());
+        m.cashMin = Math.min(m.cashMin, this.cash);
+        m.maxWeight = Math.max(m.maxWeight, this.maxPositionWeightPct());
+        m.diversified = Math.max(m.diversified, this.diversifiedCount());
+        if (this.cash / pv < 0.015 && !m.cashAlerted) {
+          m.cashAlerted = true;
+          this.emitEvent('alert', { kind: 'cash' });
+        }
+        if (this.maxPositionWeightPct() > 0.4 * 100 && !m.concentrationAlerted) {
+          m.concentrationAlerted = true;
+          this.emitEvent('alert', { kind: 'concentration' });
         }
       }
-      this.pendingClientReplies = keepReplies;
+      const pnl = this.roundTotalPnl();
+      if (pnl > m.peakPnl) m.peakPnl = pnl;
+      if (m.peakPnl - pnl > m.maxDrawdown) m.maxDrawdown = m.peakPnl - pnl;
+      this.equityCurve.push([Math.round(this.totalSim), Math.round(pnl)]);
+      if (this.equityCurve.length > 900) this.equityCurve.shift();
+    }
 
-      // Regular inbound client RFQs in IB mode
-      if (this.role === 'IB' && this.totalSim >= this.nextRfqAt) {
-        this.spawnClientRfq();
-        this.nextRfqAt = this.totalSim + this.rng.range(BALANCE.rfqIntervalMin, BALANCE.rfqIntervalMax);
-      }
+    if (this.simTime >= this.roundSeconds) {
+      this.simTime = this.roundSeconds;
+      this.endRound();
+    }
+  }
 
-      this.updatePrices(dt);
-      this.updateCandles();
+  updatePrices(dt) {
+    for (const t of TICKERS) {
+      const i = this.inst[t];
+      const prev = i.mid;
+      const pull = (i.logTarget - i.logV) * BALANCE.priceConvergence * dt;
+      const shock = i.vol * this.rng.gauss() * Math.sqrt(dt) * 0.38;
+      i.logV += pull + shock;
+      const mid = priceStr(Math.exp(i.logV), i.dp);
+      i.mid = mid;
+      i.last = mid;
+      i.dir = mid >= prev ? 1 : -1;
+      if (mid > i.high) i.high = mid;
+      if (mid < i.low) i.low = mid;
+    }
+  }
 
-      if (this.role === 'IB') {
-        this.evaluateIbQuotes();
+  updateCandles() {
+    const bucket = Math.floor(this.totalSim / 5) * 5;
+    for (const t of TICKERS) {
+      const i = this.inst[t];
+      const arr = this.candles[t];
+      const last = arr[arr.length - 1];
+      const dec = (v) => priceStr(v, i.dp);
+      if (!last || last[0] < bucket) {
+        arr.push([bucket, dec(i.mid), dec(i.mid), dec(i.mid), dec(i.mid), Math.round(4000 + this.rng.next() * 22000)]);
       } else {
-        this.processDealerReplies();
+        last[2] = Math.max(last[2], dec(i.mid));
+        last[3] = Math.min(last[3], dec(i.mid));
+        last[4] = dec(i.mid);
+        last[5] += Math.round(600 + this.rng.next() * 3800);
       }
-
-      this.processMarkouts();
-
-      // Deal room chatter
-      if (this.totalSim >= this.nextChatterAt) {
-        this.nextChatterAt = this.totalSim + this.rng.range(BALANCE.chatterMin, BALANCE.chatterMax);
-        const tk = this.rng.pick(Object.keys(this.inst));
-        this.say('desk', 'deal', this.rng.pick(DEAL_ROOM_LINES).replace('{t}', tk));
-      }
-      if (this.pendingReplyAt && this.totalSim >= this.pendingReplyAt) {
-        this.pendingReplyAt = null;
-        this.say('desk', 'deal', 'Copy that — watching the tape closely here.');
-      }
-
-      const gn = this.grossNotional();
-      if (gn > this.metrics.maxAbsNotional) this.metrics.maxAbsNotional = gn;
-
-      if (this.simTime >= this.roundSeconds) {
-        this.simTime = this.roundSeconds;
-        this.endRound();
-      }
-    } else if (this.phase === 'break') {
-      this.breakTime += dt;
+      if (arr.length > 900) arr.shift();
     }
   }
 
@@ -1802,165 +1789,214 @@ export class Session {
 
   toggleWatchTicker(t) {
     if (!this.inst[t]) return;
-    if (this.watchedTickers.includes(t)) {
-      this.watchedTickers = this.watchedTickers.filter((x) => x !== t);
-    } else {
-      this.watchedTickers = [...this.watchedTickers, t];
+    this.watchedTickers = this.watchedTickers.includes(t)
+      ? this.watchedTickers.filter((x) => x !== t)
+      : [...this.watchedTickers, t].slice(-4);
+  }
+
+  benchmarkSeries() {
+    const buckets = new Map();
+    for (const t of TICKERS) {
+      const open = this.inst[t].open;
+      for (const c of this.candles[t]) {
+        const b = c[0];
+        if (!buckets.has(b)) buckets.set(b, { sum: 0, n: 0 });
+        const cur = buckets.get(b);
+        cur.sum += (c[4] / open) * 100;
+        cur.n += 1;
+      }
     }
+    return [...buckets.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([t, v]) => [t, Math.round((v.sum / v.n) * 1000) / 1000]);
   }
 
   // ---------------------------------------------------------------- Snapshot
   snapshot() {
     const lb = this.leaderboard();
+    const role = this.role;
     const unr = this.unrealised();
-    const comm = this.roundCommissionDisplay();
-    const roundTotal = this.roundTotalPnl();
+    const pv = this.portfolioValue();
+    const commission = this.commissionDisplay();
+    const roundPnl = this.roundTotalPnl();
     const roleScore = this.computeRoleScore();
-    const maxSingle = this.role === 'IB' ? BALANCE.ibMaxSingleNotional : BALANCE.amMaxSingleNotional;
-    const maxGross = this.role === 'IB' ? BALANCE.ibMaxGrossNotional : BALANCE.amMaxGrossNotional;
+    const pvBase = this.phase === 'briefing' ? BALANCE.amFundCapital : pv;
 
-    // Build AmplifyME-exact POSITIONS rows (includes any security traded this round even if NET POS == 0!)
-    const positionRows = Object.keys(this.positions)
-      .filter((t) => this.positions[t].qty !== 0 || this.positions[t].traded)
+    const positions = TICKERS
+      .filter((t) => this.positions[t].traded || this.positions[t].qty !== 0)
       .map((t) => {
         const p = this.positions[t];
-        const mid = this.inst[t].mid;
-        const dec = this.inst[t].ref >= 100 ? r2 : r3;
-        const posVal = Math.round(Math.abs(p.qty) * mid);
-        const unrealPnl = p.qty !== 0 ? Math.round(p.qty * (mid - p.avg)) : 0;
-        const realPnl = Math.round(p.realisedPnl);
-        const netPnl = realPnl + unrealPnl;
+        const inst = this.inst[t];
+        const notional = Math.round(p.qty * inst.mid);
         return {
           ticker: t,
           qty: p.qty,
-          avg: p.qty !== 0 ? dec(p.avg) : 0,
-          mark: dec(mid),
-          notional: posVal,
-          unreal: unrealPnl,
-          realised: realPnl,
-          netPnl,
-          pctOfLimit: Math.min(100, (posVal / maxSingle) * 100),
+          avg: p.qty !== 0 ? priceStr(p.avg, inst.dp) : 0,
+          mark: priceStr(inst.mid, inst.dp),
+          notional,
+          absNotional: Math.abs(notional),
+          unreal: Math.round(p.qty !== 0 ? p.qty * (inst.mid - p.avg) : 0),
+          realised: Math.round(p.realisedPnl),
+          netPnl: Math.round(p.realisedPnl + (p.qty !== 0 ? p.qty * (inst.mid - p.avg) : 0)),
+          pctOfPortfolio: pvBase > 0 ? Math.round((Math.abs(notional) / pvBase) * 1000) / 10 : 0,
+          pctOfLimit: Math.min(100, Math.round((Math.abs(notional) / BALANCE.amMaxSingleNotional) * 1000) / 10),
         };
       });
 
-    // Chat rooms list tailored to current Role
-    const contactRooms = this.role === 'IB'
-      ? this.clients.map((c) => {
-          const openReq = this.clientRequests.find((r) => r.clientRoom === c.roomId && r.status === 'open');
-          return {
-            id: c.roomId,
-            name: c.roomId,
-            team: c.team,
-            headerTitle: `${c.traderCode} - ${c.phone}`,
-            subTitle: 'SINGLE',
-            hasOpenRfq: Boolean(openReq),
-            openRfq: openReq ? { id: openReq.id, ticker: openReq.ticker, qty: openReq.qty } : null,
-          };
-        })
+    const contactList = role === 'IB'
+      ? this.clients.map((c) => ({
+          id: c.id,
+          name: c.name,
+          team: c.team,
+          phone: c.phone,
+          color: c.color,
+          unread: c.unread || 0,
+          openRfq: this.clientRequests.find((r) => r.clientId === c.id && r.status === 'open') || null,
+          trades: c.trades,
+        }))
       : this.dealers.map((d) => ({
-          id: d.roomId,
-          name: d.roomId,
+          id: d.id,
+          name: d.name,
           team: d.team,
-          headerTitle: `${d.traderCode} - ${d.phone}`,
-          subTitle: `INSTITUTIONAL · ${d.specialty.join('/')}`,
-          hasOpenRfq: this.liveQuotes.some((q) => q.dealerRoom === d.roomId && q.status === 'live'),
-          openRfq: null,
+          phone: d.phone,
+          color: d.color,
+          unread: 0,
+          openRfq: this.liveQuotes.find((q) => q.dealerId === d.id && q.status === 'live') || null,
+          trades: d.fills,
         }));
 
-    const chatRooms = [
-      { id: 'deal', name: 'Deal Room', team: '', headerTitle: 'DEAL ROOM — GLOBAL FLOOR', subTitle: 'MULTI-DESK', hasOpenRfq: false },
-      { id: 'ib', name: 'IB Room', team: '', headerTitle: 'DESK WIRE & RISK ALERTS', subTitle: 'INTERNAL', hasOpenRfq: false },
-      ...contactRooms,
-    ];
+    const roomTabs = role === 'IB'
+      ? [{ id: 'ib', name: 'IB Room' }, { id: 'deal', name: 'Deal Room' }]
+      : [{ id: 'am', name: 'AM Room' }, { id: 'deal', name: 'Deal Room' }];
 
-    const activeReq = this.clientRequests.find((r) => r.status === 'open') || null;
+    const chartInst = this.inst[this.chartTicker] || this.inst.MSFT;
+    const chartPos = this.positions[this.chartTicker];
 
     return {
       sessionId: this.id,
       nickname: this.nickname,
       mode: this.mode,
+      pace: this.pace,
       startRole: this.startRole,
       assistMode: this.assistMode,
       phase: this.phase,
-      role: this.role, // 'IB' | 'AM'
-      roleBadge: this.role === 'IB' ? 'IB 1' : 'AM 1',
+      role,
+      roleBadge: ROLE_BADGES[role],
+      roleLabel: ROLE_LABELS[role],
       round: this.round,
       roundsTotal: this.roundsTotal,
       roundSeconds: this.roundSeconds,
       totalSim: Math.round(this.totalSim * 10) / 10,
       simTime: Math.round(this.simTime * 10) / 10,
       timeLeft: Math.max(0, Math.round((this.roundSeconds - this.simTime) * 10) / 10),
-      progress: this.phase === 'round' ? Math.min(1, this.simTime / this.roundSeconds) : this.phase === 'briefing' ? 0 : 1,
+      progress: this.phase === 'round' ? clamp(this.simTime / this.roundSeconds, 0, 1) : this.phase === 'briefing' ? 0 : 1,
       speed: this.speed,
       paused: this.paused,
-      clock: fmtClock(this.totalSim),
+      clock: fmtClock(this.totalSim, this.clockScale),
       pnl: {
         realized: Math.round(this.realized),
         unrealised: Math.round(unr),
-        fees: comm, // In IB: positive net commission earned! In AM: fees paid.
-        commission: comm,
-        total: Math.round(roundTotal),
+        commission,
+        total: Math.round(roundPnl),
         sessionTotal: Math.round(this.totalPnl()),
-        roiPct: this.role === 'AM' ? r2((roundTotal / BALANCE.amFundCapital) * 100) : null,
+        roiPct: role === 'AM' ? r2((roundPnl / BALANCE.amFundCapital) * 100) : null,
         fundCapital: BALANCE.amFundCapital,
-        portfolioValue: Math.round(BALANCE.amFundCapital + roundTotal),
-        cashAvailable: Math.round(BALANCE.amFundCapital + this.realized - this.amCommPaid - this.grossNotional()),
+        portfolioValue: Math.round(pv),
+        cashAvailable: Math.round(this.cash),
+        sharesOwned: this.sharesOwned(),
       },
-      positions: positionRows,
-      grossNotional: Math.round(this.grossNotional()),
-      netNotional: Math.round(this.netNotional()),
-      watchedTickers: this.watchedTickers,
-      equities: Object.keys(this.inst).map((t) => {
+      risk: {
+        gross: Math.round(this.grossNotional()),
+        net: Math.round(this.netNotional()),
+        netPct: pv > 0 ? Math.round((this.netNotional() / pv) * 1000) / 10 : 0,
+        limit: role === 'IB' ? BALANCE.ibMaxGrossNotional : BALANCE.amMaxGrossNotional,
+        netLimit: 3000000,
+        cashPct: role === 'AM' ? Math.round((this.cash / Math.max(1, pv)) * 1000) / 10 : null,
+        maxWeightPct: role === 'AM' ? Math.round(this.maxPositionWeightPct() * 10) / 10 : null,
+        perTicker: positions.filter((p) => p.qty !== 0).map((p) => ({
+          ticker: p.ticker, notional: p.notional, pct: p.pctOfLimit, pctOfPortfolio: p.pctOfPortfolio,
+        })),
+      },
+      equities: TICKERS.map((t) => {
         const e = this.inst[t];
-        const dec = e.ref >= 100 ? r2 : r3;
-        const dq10k = this.depthQuote(t, 10000);
+        const d10 = this.depthQuote(t, 10000);
         return {
           ticker: t,
           name: e.name,
           sector: e.sector,
           type: e.type,
-          ref: dec(e.open),
-          last: dec(e.mid),
-          bid: dq10k.sellPrice,
-          offer: dq10k.buyPrice,
-          baseDepth: e.baseDepth,
-          exchangeBaseHalfSpread: BALANCE.exchangeBaseHalfSpread,
-          exchangeDepthSlope: BALANCE.exchangeDepthSlope,
-          feeRate: this.role === 'IB' ? BALANCE.ibExchangeFeeRate : BALANCE.amExchangeFeeRate,
-          chg: dec(e.mid - e.open),
-          chgPct: (e.mid / e.open - 1) * 100,
+          dp: e.dp,
+          ref: priceStr(e.mid, e.dp),
+          open: e.open,
+          last: priceStr(e.mid, e.dp),
+          bid: d10?.sellPrice ?? null,
+          offer: d10?.buyPrice ?? null,
+          chg: Math.round((e.mid - e.open) * 100) / 100,
+          chgPct: Math.round((e.mid / e.open - 1) * 10000) / 100,
           dir: e.dir,
         };
       }),
+      positions,
+      blotter: this.blotter.slice(0, 60),
+      newTrades: this.blotter.length,
+      tradeSeq: this.metrics.tradeSeq,
       chart: {
         ticker: this.chartTicker,
+        dp: chartInst.dp,
         candles: this.candles[this.chartTicker] || [],
-        ref: this.inst[this.chartTicker]?.open ?? 0,
+        benchmark: role === 'AM' ? this.benchmarkSeries() : [],
+        ref: chartInst.open,
+        avgLong: chartPos && chartPos.qty > 0 ? priceStr(chartPos.avg, chartInst.dp) : null,
+        avgShort: chartPos && chartPos.qty < 0 ? priceStr(chartPos.avg, chartInst.dp) : null,
         markers: this.blotter
-          .filter((b) => b.ticker === this.chartTicker && b.source !== 'EOD_CLOSE')
-          .slice(0, 20)
-          .map((b) => ({ t: b.at, price: b.price, side: b.side, source: b.source })),
+          .filter((b) => b.ticker === this.chartTicker)
+          .slice(0, 25)
+          .map((b) => ({ t: b.at, price: b.price, side: b.side, venue: b.venue })),
       },
-      news: this.news.slice(0, 22),
-      chatRooms,
-      messages: this.messages.slice(-90),
-      liveQuotes: this.liveQuotes.map((q) => ({
-        id: q.id,
-        role: q.role,
-        room: q.clientRoom || q.dealerRoom,
-        team: q.team,
-        traderCode: q.traderCode,
-        ticker: q.ticker,
-        bid: q.bid,
-        offer: q.offer,
-        bidVol: q.bidVol,
-        offerVol: q.offerVol,
-        validFor: Math.max(0, Math.ceil(q.expiresAt - this.totalSim)),
+      news: this.news.slice(0, 30).map((n) => ({
+        ...n,
+        headline: String(n.headline || '').replace(/^(MACRO|NOTE|[A-Z]{2,6}):\s*/, ''),
       })),
+      messages: this.messages.slice(-140),
+      chatRooms: roomTabs,
+      contacts: contactList,
+      clients: contactList,
+      clientRequests: this.clientRequests
+        .filter((r) => r.status === 'open')
+        .map((r) => ({
+          id: r.id,
+          clientId: r.clientId,
+          clientName: r.clientName,
+          team: r.team,
+          ticker: r.ticker,
+          qty: r.qty,
+          sideBias: r.sideBias,
+          message: r.message,
+          ttlLeft: Math.max(0, Math.ceil(r.expiresAt - this.totalSim)),
+          informed: r.informed,
+        })),
+      liveQuotes: this.liveQuotes
+        .filter((q) => q.status === 'live')
+        .map((q) => ({
+          id: q.id,
+          role: q.role,
+          room: q.clientId || q.dealerId,
+          team: q.team,
+          name: q.clientName || q.dealerName,
+          ticker: q.ticker,
+          bid: q.bid,
+          offer: q.offer,
+          bidVol: q.bidVol,
+          offerVol: q.offerVol,
+          validFor: Math.max(0, Math.ceil(q.expiresAt - this.totalSim)),
+          expiresAt: Math.round(q.expiresAt * 10) / 10,
+          halfBps: q.halfBps ?? (Math.round((((q.offer - q.bid) / 2) / q.refAtQuote) * 1e4 * 10) / 10),
+          qtyRequested: q.qtyRequested || null,
+        })),
       oldQuotes: this.oldQuotes.slice(0, 25).map((q) => ({
         id: q.id,
         team: q.team,
-        traderCode: q.traderCode,
+        name: q.clientName || q.dealerName,
         ticker: q.ticker,
         bid: q.bid,
         offer: q.offer,
@@ -1969,71 +2005,40 @@ export class Session {
         status: q.status,
         fillSide: q.fillSide || null,
         fillPrice: q.fillPrice || null,
+        fillQty: q.fillQty || null,
         closedClock: q.closedClock || '',
       })),
-      rfq: activeReq
-        ? {
-            id: activeReq.id,
-            clientRoom: activeReq.clientRoom,
-            team: activeReq.team,
-            clientName: activeReq.traderCode,
-            ticker: activeReq.ticker,
-            qty: activeReq.qty,
-            ttlLeft: Math.max(0, Math.ceil(activeReq.expiresAt - this.totalSim)),
-          }
-        : null,
-      clientRequests: this.clientRequests
-        .filter((r) => r.status === 'open')
-        .map((r) => ({
-          id: r.id,
-          clientRoom: r.clientRoom,
-          team: r.team,
-          traderCode: r.traderCode,
-          ticker: r.ticker,
-          qty: r.qty,
-          ttlLeft: Math.max(0, Math.ceil(r.expiresAt - this.totalSim)),
-        })),
-      blotter: this.blotter.slice(0, 35),
-      leaderboard: lb,
       roleScore,
-      roundHistory: this.roundHistory,
       coach: {
-        quotesSent: this.metrics.quotesSent,
-        quotesCancelled: this.metrics.quotesCancelled,
-        fills: this.metrics.rfqFills + this.metrics.amIbBlocks,
-        exchangeTrades: this.metrics.exchangeTrades,
-        hitRate: this.metrics.quotesSent ? this.metrics.rfqFills / this.metrics.quotesSent : 0,
-        capture: Math.round(this.metrics.spreadCapture),
-        adverse: Math.round(this.metrics.adverse),
-        staleSniped: this.metrics.staleSniped,
-        fatFingers: this.metrics.fatFingers,
-        proactiveSales: this.metrics.proactiveSales,
-        proactiveConversions: this.metrics.proactiveConversions,
-        fees: comm,
-        netEdge: Math.round(this.metrics.spreadCapture + this.metrics.adverse),
-        maxRisk: Math.round(this.metrics.maxAbsNotional),
+        gauges: roleScore.gauges,
+        total: roleScore.total,
         tips: this.phase === 'round' ? this.liveTips() : [],
+        stats: {
+          clientFills: this.metrics.clientFills,
+          clientNotional: Math.round(this.metrics.clientNotional),
+          quotesSent: this.metrics.quotesSent,
+          quotesCancelled: this.metrics.quotesCancelled,
+          staleSniped: this.metrics.staleSniped,
+          fatFingers: this.metrics.fatFingers,
+          amDealerTrades: this.metrics.amDealerTrades,
+          amExchangeTrades: this.metrics.amExchangeTrades,
+          avgSlippageBps: this.metrics.execNotionalSum > 0
+            ? Math.round((this.metrics.execCostSum / this.metrics.execNotionalSum) * 10) / 10
+            : null,
+          netExposure: Math.round(this.netNotional()),
+          cashPct: role === 'AM' ? Math.round((this.cash / Math.max(1, pv)) * 1000) / 10 : null,
+          maxWeightPct: role === 'AM' ? Math.round(this.maxPositionWeightPct() * 10) / 10 : null,
+        },
       },
-      clients: (this.role === 'IB' ? this.clients : this.dealers).map((c) => ({
-        id: c.id,
-        name: c.traderCode,
-        team: c.team,
-        label: c.label || `Dealer (${c.specialty?.join(', ')})`,
-        trades: c.trades,
-        note: c.note,
-      })),
+      leaderboard: lb,
+      roundHistory: this.roundHistory,
       roundStats: this.roundStats,
       debrief: this.debrief,
       final: this.final,
-      risk: {
-        gross: Math.round(this.grossNotional()),
-        net: Math.round(this.netNotional()),
-        limit: maxGross,
-        perTickerLimit: maxSingle,
-        perTicker: positionRows
-          .filter((p) => p.qty !== 0)
-          .map((p) => ({ ticker: p.ticker, notional: p.notional, pct: p.pctOfLimit })),
-      },
+      events: this.events.slice(-30),
+      lastEventId: this.lastEventId,
+      depth: this.lastDepth,
+      sound: { enabled: true },
     };
   }
 }

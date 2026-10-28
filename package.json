@@ -14,7 +14,12 @@
     "serve": "npm run build && node server/index.js",
     "docker:build": "docker build -t tradelab .",
     "docker:run": "docker run --rm -p 8788:8788 tradelab",
-    "balance": "node scripts/balance.js"
+    "balance": "node scripts/balance.js",
+    "make:guide": "node scripts/make-guide.mjs",
+    "prebuild": "node scripts/make-guide.mjs",
+    "playtest": "node scripts/playtest.js",
+    "render:test": "node scripts/render-test.mjs",
+    "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
     "express": "^4.19.2",

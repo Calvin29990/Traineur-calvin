@@ -6,6 +6,7 @@ export function useSocket() {
   const [state, setState] = useState(null);
   const [connected, setConnected] = useState(false);
   const [toasts, setToasts] = useState([]);
+  const [meta, setMeta] = useState(null);
   const wsRef = useRef(null);
   const sessionRef = useRef(localStorage.getItem('tl.session') || null);
   const retryRef = useRef(0);
@@ -40,7 +41,9 @@ export function useSocket() {
       else if (msg.type === 'joined') {
         sessionRef.current = msg.sessionId;
         localStorage.setItem('tl.session', msg.sessionId);
-      } else if (msg.type === 'error') notify(msg.message, 'err');
+      } else if (msg.type === 'hello') setMeta(msg);
+      else if (msg.type === 'error') notify(msg.message, 'err');
+      else if (msg.type === 'info') notify(msg.message, 'info');
     };
 
     ws.onclose = () => {
@@ -76,5 +79,5 @@ export function useSocket() {
     setTimeout(() => connect(), 200);
   }, [connect]);
 
-  return { state, connected, send, notify, toasts, resetSession };
+  return { state, connected, send, notify, toasts, meta, resetSession };
 }
