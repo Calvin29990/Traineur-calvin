@@ -1,193 +1,193 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { money, cls, signCls, pctSign } from '../lib/format.js';
+import React from 'react';
+import { cls, money, shares, mmss } from '../lib/format.js';
 
-function playFloorChime(kind = 'news') {
-  try {
-    if (typeof window === 'undefined') return;
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    if (!AudioCtx) return;
-    const ctx = new AudioCtx();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(kind === 'warn' ? 660 : 880, ctx.currentTime);
-    if (kind === 'news') {
-      osc.frequency.exponentialRampToValueAtTime(1175, ctx.currentTime + 0.09);
-    }
-    gain.gain.setValueAtTime(0.06, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.22);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start();
-    osc.stop(ctx.currentTime + 0.23);
-    setTimeout(() => { try { ctx.close(); } catch { /* ignore */ } }, 350);
-  } catch {
-    /* ignore audio errors */
-  }
+function Metric({ label, value, tone = '', extra = null, small = false }) {
+  return (
+    <div className={cls('top-metric', small && 'small')}>
+      <span className="tm-label">{label}</span>
+      <span className={cls('tm-value mono', tone)}>{value}</span>
+      {extra}
+    </div>
+  );
 }
 
-export default function TopBar({ state, send, onDrawer, drawer }) {
-  const pnl = state?.pnl ?? { realized: 0, unrealised: 0, commission: 0, total: 0 };
-  const role = state?.role ?? 'IB';
-  const roleBadge = state?.roleBadge ?? 'IB 1';
-  const topPct = state?.leaderboard?.topPct ?? 50;
-  const topBand = Math.max(1, Math.round(100 - topPct));
-  const ffc = state?.coach?.fatFingers ?? 0;
-
-  const [squawkOn, setSquawkOn] = useState(false);
-  const lastNewsRef = useRef(null);
-
-  useEffect(() => {
-    const topNews = state?.news?.[0];
-    if (!topNews || topNews.id === lastNewsRef.current) return;
-    lastNewsRef.current = topNews.id;
-    if (squawkOn && state?.phase === 'round') {
-      playFloorChime(topNews.kind === 'NOTE' ? 'warn' : 'news');
-    }
-  }, [state?.news?.[0]?.id, squawkOn, state?.phase]);
-
-  const timeLeft = Math.max(0, Math.round(state?.timeLeft ?? 0));
-  const mm = String(Math.floor(timeLeft / 60)).padStart(2, '0');
-  const ss = String(timeLeft % 60).padStart(2, '0');
-
+function SoundControl({ muted, volume, onToggle, onVolume }) {
   return (
-    <header className="amp-topbar">
-      <div className="amp-brand" title="CFA Institute × AmplifyME Investing Simulator Training">
-        <span className="amp-wordmark">A M P L I F Y</span>
-        <span className="amp-tri">▼</span>
+    <div className="sound-ctrl" title="Bruitage salle de marché — Web Audio">
+      <button
+        type="button"
+        className={cls('icon-btn sound-btn', !muted && 'on')}
+        onClick={onToggle}
+        aria-label={muted ? 'Unmute market floor audio' : 'Mute market floor audio'}
+      >
+        {muted ? '🔇' : '🔊'}
+      </button>
+      <input
+        type="range"
+        min="0"
+        max="100"
+        value={Math.round(volume * 100)}
+        onChange={(e) => onVolume(Number(e.target.value) / 100)}
+        className="vol-slider"
+        aria-label="Volume"
+        title={`Volume ${Math.round(volume * 100)}%`}
+      />
+    </div>
+  );
+}
+
+function UserBadge({ state, onHelp }) {
+  const role = state?.role ?? 'IB';
+  const badge = state?.roleBadge ?? 'IB-55';
+  const name = state?.nickname || 'Calvin MINANG';
+  const roleText = role === 'AM' ? 'Asset Manager' : '(all roles)';
+  const initials = name.split(' ').map((p) => p[0]).join('').slice(0, 2).toUpperCase();
+  return (
+    <div className="user-badge">
+      <div className="avatar">{initials || 'CM'}</div>
+      <div className="ub-meta">
+        <div className="ub-name" title={name}>{name}</div>
+        <div className="ub-role">/ {roleText} / <b>{badge}</b></div>
       </div>
+      <button type="button" className="qmark" onClick={onHelp} title="Aide, règles & barème">?</button>
+    </div>
+  );
+}
 
-      <div className="amp-clock">{state?.clock ?? '13:00:00'}</div>
+export default function TopBar({
+  state, send, drawer, onDrawer, connected,
+  audioMuted, audioVolume, onToggleMute, onVolume, onGuide,
+}) {
+  const role = state?.role ?? 'IB';
+  const pnl = state?.pnl ?? {};
+  const risk = state?.risk ?? {};
+  const score = state?.roleScore?.total ?? 0;
+  const paused = Boolean(state?.paused);
+  const timeLeft = state?.timeLeft ?? 0;
+  const progress = state?.progress ?? 0;
 
-      <div className="amp-metrics">
-        <div className="amp-metric">
-          <span className="amp-mlabel">Realised P+L</span>
-          <span className={cls('amp-mval', signCls(pnl.realized))}>{money(pnl.realized)}</span>
+  const handleRestart = () => {
+    if (typeof window !== 'undefined' && !window.confirm('Quitter la session en cours et revenir au briefing ?')) return;
+    send({ type: 'restart' });
+  };
+
+  const segment = cls('topbar', role === 'AM' ? 'am' : 'ib');
+
+  const clockBlock = (
+    <div className="clock-block">
+      <div className="brand-inline">
+        {/* eslint-disable-next-line jsx-a11y/alt-text */}
+        <div className="av-logo" title="AmplifyME">AV</div>
+        <div className="brand-word">
+          <b>AmplifyME</b>
+          <small>CFA Institute Challenge</small>
         </div>
+        <span className={cls('conn-dot', connected ? 'ok' : 'bad')} title={connected ? 'Connected' : 'Reconnecting…'} />
+      </div>
+      <div className="clock-line">
+        <span className="clock mono">{state?.clock ?? '13:00:00'}</span>
+        <span className="round-line mono">
+          R{state?.round ?? 1}/{state?.roundsTotal ?? 2} · {mmss(timeLeft)}
+        </span>
+      </div>
+      <div className="time-bar"><i style={{ width: `${Math.round(progress * 100)}%` }} /></div>
+    </div>
+  );
 
-        <div className="amp-metric">
-          <span className="amp-mlabel">Unrealised P+L</span>
-          <span className={cls('amp-mval', signCls(pnl.unrealised))}>{money(pnl.unrealised)}</span>
+  const controls = (
+    <div className="top-controls">
+      <button
+        type="button"
+        className={cls('icon-btn', drawer === 'coach' && 'active')}
+        onClick={() => onDrawer('coach')}
+        title="Coach temps réel & jauges de score (C)"
+      >
+        ◎
+      </button>
+      <span className={cls('score-chip', score >= 90 ? 'elite' : score >= 70 ? 'good' : score >= 50 ? 'mid' : 'low')} title="Score global AmplifyME">
+        {score}%
+      </span>
+      <button type="button" className={cls('icon-btn', paused && 'active')} onClick={() => send({ type: 'pause' })} title="Pause / Reprendre (Espace)">
+        {paused ? '▶' : '||'}
+      </button>
+      <SoundControl muted={audioMuted} volume={audioVolume} onToggle={onToggleMute} onVolume={onVolume} />
+      <button type="button" className="icon-btn guide-ico" onClick={onGuide} title="Guide PDF Top 1%">📄</button>
+      <button type="button" className="icon-btn" onClick={handleRestart} title="Nouvelle session">↻</button>
+    </div>
+  );
+
+  if (role === 'AM') {
+    const cash = pnl.cashAvailable ?? 0;
+    const net = risk.net ?? 0;
+    return (
+      <header className={segment}>
+        <div className="am-row1">
+          {clockBlock}
+          <div className="top-metrics six">
+            <Metric label="Shares Owned" value={shares(pnl.sharesOwned ?? 0)} />
+            <Metric label="Realised P+L" value={money(pnl.realized)} tone={pnl.realized > 0 ? 'pos' : pnl.realized < 0 ? 'neg' : ''} />
+            <Metric label="Unrealised P+L" value={money(pnl.unrealised)} tone={pnl.unrealised > 0 ? 'pos' : pnl.unrealised < 0 ? 'neg' : ''} />
+            <Metric label="Available cash" value={`$${money(cash)}`} tone={cash < 2000000 ? 'neg' : ''} />
+            <Metric label="Total PnL" value={money(pnl.total)} tone={pnl.total > 0 ? 'pos' : pnl.total < 0 ? 'neg' : ''} />
+            <Metric
+              label="Portfolio Value"
+              value={`$${money(pnl.portfolioValue ?? 0)}`}
+              tone={(pnl.portfolioValue ?? 0) >= 20000000 ? 'pos' : 'neg'}
+              extra={pnl.roiPct != null ? <span className={cls('roi-pill', pnl.roiPct >= 0 ? 'pos' : 'neg')}>{pnl.roiPct >= 0 ? '+' : ''}{pnl.roiPct}%</span> : null}
+            />
+          </div>
+          {controls}
         </div>
-
-        <div className="amp-metric">
-          <span className="amp-mlabel">Commission</span>
-          <span
-            className={cls(
-              'amp-mval',
-              role === 'IB' ? signCls(pnl.commission) : (pnl.commission > 0 ? 'zero-val' : 'zero-val')
-            )}
-            title={role === 'IB' ? 'Net IB Commission earned on client trades' : 'Execution commissions paid ($20M Fund)'}
-          >
-            {money(pnl.commission)}
-          </span>
-        </div>
-
-        <div className="amp-metric">
-          <span className="amp-mlabel">Total P+L</span>
-          <span className={cls('amp-mval', signCls(pnl.total))}>{money(pnl.total)}</span>
-          {role === 'AM' && pnl.roiPct != null && (
-            <span className={cls('amp-roi-pill', signCls(pnl.total))} title="Return on $20,000,000 Asset Management Mandate">
-              {pctSign(pnl.roiPct, 2)}
+        <div className="am-row2">
+          <div className="net-exposure">
+            <span className="tm-label">Net Exposure</span>
+            <span className={cls('mono ne-value', net > 0 ? 'pos' : net < 0 ? 'neg' : '')}>
+              {net > 0 ? '+' : net < 0 ? '-' : ''}${money(Math.abs(net))}
             </span>
-          )}
+            <span className="ne-pct mono">({(risk.netPct ?? 0) > 0 ? '+' : ''}{risk.netPct ?? 0}% du fonds)</span>
+          </div>
+          <div className="am-row2-spacer" />
+          <UserBadge state={state} onHelp={() => onDrawer('help')} />
         </div>
+      </header>
+    );
+  }
+
+  const net = risk.net ?? 0;
+  return (
+    <header className={segment}>
+      {clockBlock}
+      <div className="top-metrics five">
+        <Metric label="Realised P+L" value={money(pnl.realized)} tone={pnl.realized > 0 ? 'pos' : pnl.realized < 0 ? 'neg' : ''} />
+        <Metric label="Unrealised P+L" value={money(pnl.unrealised)} tone={pnl.unrealised > 0 ? 'pos' : pnl.unrealised < 0 ? 'neg' : ''} />
+        <Metric
+          label="Net Exposure"
+          value={`${net > 0 ? '+' : net < 0 ? '-' : ''}$${money(Math.abs(net))}`}
+          tone={Math.abs(net) > 3000000 ? 'neg' : net > 0 ? 'pos' : net < 0 ? 'neg' : ''}
+        />
+        <Metric label="Commission" value={money(pnl.commission)} tone={pnl.commission > 0 ? 'pos' : pnl.commission < 0 ? 'neg' : ''} />
+        <Metric label="Total P+L" value={money(pnl.total)} tone={pnl.total > 0 ? 'pos' : pnl.total < 0 ? 'neg' : ''} />
       </div>
-
-      <div className="spacer" />
-
-      {/* Round timer & simulation controls */}
-      <div className="amp-sim-strip">
-        <span className={cls('amp-role-tag', role === 'AM' && 'am')} title={role === 'IB' ? 'Sell-Side Investment Bank Market Maker' : 'Buy-Side $20M Asset Manager'}>
-          R{state?.round || 1}/{state?.roundsTotal || 2} · {roleBadge}
-          {state?.phase === 'round' ? ` · ${mm}:${ss}` : ''}
-        </span>
-
-        {ffc > 0 && (
-          <span className="amp-ffc-badge" title="Fat Finger Count — clerical errors penalize your AmplifyME score!">
-            FFC {ffc}
-          </span>
-        )}
-
-        <button
-          type="button"
-          className={cls('amp-tool-btn', topBand <= 10 && 'top10', drawer === 'leaderboard' && 'active')}
-          onClick={() => onDrawer('leaderboard')}
-          title="Global CFA × AmplifyME Leaderboard (Shortcut: K)"
-        >
-          🏆 Top {topBand}%
+      <div className="top-controls">
+        <button type="button" className={cls('icon-btn', paused && 'active')} onClick={() => send({ type: 'pause' })} title="Pause / Reprendre (Espace)">
+          {paused ? '▶' : '||'}
         </button>
-
+        <SoundControl muted={audioMuted} volume={audioVolume} onToggle={onToggleMute} onVolume={onVolume} />
         <button
           type="button"
-          className={cls('amp-tool-btn', drawer === 'coach' && 'active')}
+          className={cls('icon-btn', drawer === 'coach' && 'active')}
           onClick={() => onDrawer('coach')}
-          title="AmplifyME Score Breakdown & Real-Time Coach"
+          title="Coach temps réel & jauges de score (C)"
         >
-          ◎ Score {state?.roleScore?.total ?? 50}
+          ◎
         </button>
-
-        <button
-          type="button"
-          className={cls('amp-tool-btn hide-sm', state?.paused && 'active')}
-          onClick={() => send({ type: 'pause' })}
-          title="Pause / Resume simulation (Space)"
-        >
-          {state?.paused ? '▶' : '❚❚'}
-        </button>
-      </div>
-
-      {/* AmplifyME Live Floor Audio Squawk Player (exact match to image-1.png) */}
-      <button
-        type="button"
-        className={cls('amp-audio-pill', squawkOn && 'on')}
-        onClick={() => {
-          const next = !squawkOn;
-          setSquawkOn(next);
-          if (next) playFloorChime('news');
-        }}
-        title="Live Trading Floor Audio Alerts (chimes on breaking news & 1-min warning)"
-      >
-        <span className="play-ico">{squawkOn ? '❚❚' : '▶'}</span>
-        <span className="audio-bar">
-          <i style={{ width: `${Math.round((state?.progress ?? 0) * 100)}%` }} />
+        <span className={cls('score-chip', score >= 90 ? 'elite' : score >= 70 ? 'good' : score >= 50 ? 'mid' : 'low')} title="Score global AmplifyME">
+          {score}%
         </span>
-        <span className="spk-ico">{squawkOn ? '🔊' : '🔈'}</span>
-      </button>
-
-      {/* AmplifyME User / Role Profile Block (exact match to image-1.png) */}
-      <div className="amp-user-box">
-        <div className="amp-avatar" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-            <path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z" />
-          </svg>
-        </div>
-        <div className="amp-user-meta">
-          <div className="amp-user-line1">
-            {state?.nickname || 'ib1test1'} / (all roles) / <b>{roleBadge}</b>
-          </div>
-          <div className="amp-user-line2">
-            Single User Mode
-            <button
-              type="button"
-              className="amp-qmark"
-              onClick={() => onDrawer('help')}
-              title="CFA × AmplifyME Rules & Top 10% Playbook"
-            >
-              ?
-            </button>
-          </div>
-        </div>
+        <button type="button" className="icon-btn guide-ico" onClick={onGuide} title="Guide PDF Top 1%">📄</button>
+        <button type="button" className="icon-btn" onClick={handleRestart} title="Nouvelle session">↻</button>
       </div>
-
-      <button
-        type="button"
-        className="amp-exit-btn"
-        onClick={() => send({ type: 'restart' })}
-        title="New Session / Change Role Mode"
-      >
-        ↪
-      </button>
+      <UserBadge state={state} onHelp={() => onDrawer('help')} />
     </header>
   );
 }

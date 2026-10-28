@@ -1,7 +1,11 @@
-// Highcharts-style AmplifyME canvas chart renderer (Price/Volume, Line/Candlestick, SMA, Navigator).
+// Canvas chart renderer reproducing the AmplifyME CHART panel:
+// PRICE / VOLUME · LINE / CANDLESTICK · SMA · BENCHMARK · Maximum/Minimum
+// dotted lines and AVERAGE SHORT / AVERAGE LONG position lines.
 
-const usNum = (v, d) =>
-  new Intl.NumberFormat('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }).format(v);
+const fmt = (v, d = 2) => new Intl.NumberFormat('en-US', {
+  minimumFractionDigits: d,
+  maximumFractionDigits: d,
+}).format(v);
 
 export function aggregate(candles, bucketSim) {
   if (!candles?.length) return [];
@@ -23,23 +27,30 @@ export function aggregate(candles, bucketSim) {
   return out;
 }
 
+const ZOOM_FRACTION = { '5min': 0.12, '15min': 0.28, '30min': 0.5, '60min': 0.75, all: 1 };
+
 export function drawChart(canvas, candles, opts = {}) {
   const {
-    mode = 'line',          // 'line' | 'candles'
-    metric = 'price',       // 'price' | 'volume'
+    mode = 'line',
+    metric = 'price',
     showSma = false,
-    showMarkers = true,
-    ref = null,
-    dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1,
-    hoverX = null,
-    zoomRatio = 1,          // fraction of series shown (e.g. 0.25 .. 1.0)
-    allCandles = null,
+    showBenchmark = false,
+    benchmark = [],
+    zoom = 'all',
+    dp = 2,
     markers = [],
+    avgLong = null,
+    avgShort = null,
+    hoverX = null,
+    roundSeconds = 900,
+    emptyLabel = 'Waiting for market ticks…',
   } = opts;
 
-  const rect = canvas.getBoundingClientRect();
+  const rect = canvas.getBoundingClientRect?.();
+  if (!rect) return null;
+  const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
   const w = Math.max(80, rect.width);
-  const h = Math.max(80, rect.height);
+  const h = Math.max(60, rect.height);
   if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
     canvas.width = Math.round(w * dpr);
     canvas.height = Math.round(h * dpr);
@@ -50,270 +61,309 @@ export function drawChart(canvas, candles, opts = {}) {
   ctx.clearRect(0, 0, w, h);
 
   const C = {
-    grid: 'rgba(130, 170, 190, 0.22)',
+    bg: '#071e2b',
+    grid: 'rgba(120, 165, 188, 0.15)',
     axis: '#7fa1b5',
-    line: '#e8b923',
-    sma: '#29b6f6',
+    line: '#f2c94c',
+    lineGlow: 'rgba(242, 201, 76, 0.16)',
+    sma: '#4fc3f7',
     up: '#2ecc71',
-    down: '#e74c3c',
-    navBg: 'rgba(8, 28, 40, 0.85)',
-    navWindow: 'rgba(95, 165, 205, 0.24)',
-    navBorder: 'rgba(140, 195, 225, 0.55)',
+    down: '#eb5757',
+    max: 'rgba(46, 204, 113, 0.75)',
+    min: 'rgba(235, 87, 87, 0.75)',
+    bmk: '#9b8cff',
+    avgLong: '#2ecc71',
+    avgShort: '#ff9f43',
+    text: '#cfe6f2',
+    dim: '#6c8ea2',
   };
 
-  const navH = h >= 150 ? 22 : 0;
-  const padL = 8;
-  const padR = 46;
-  const padT = 8;
-  const timeAxisH = 16;
+  const padL = 6;
+  const padR = 54;
+  const padT = 10;
+  const timeH = 16;
   const plotW = w - padL - padR;
-  const plotH = h - padT - timeAxisH - (navH ? navH + 5 : 2);
+  const plotH = h - padT - timeH;
+  if (plotW < 24 || plotH < 24) return null;
 
-  const fullSeries = allCandles?.length ? allCandles : candles;
-  const data = candles;
-
-  if (!data?.length || plotW < 20 || plotH < 20) {
-    ctx.fillStyle = C.axis;
-    ctx.font = '11px sans-serif';
-    ctx.fillText('Waiting for market ticks…', 14, h / 2);
+  const fraction = ZOOM_FRACTION[zoom] ?? 1;
+  const count = Math.max(6, Math.round(candles.length * fraction));
+  const data = candles.slice(-count);
+  if (!data.length) {
+    ctx.fillStyle = C.dim;
+    ctx.font = '11px ui-monospace, monospace';
+    ctx.fillText(emptyLabel, 14, h / 2);
     return null;
   }
 
-  const n = data.length;
-  const xStep = plotW / Math.max(1, n - 1);
-  const xAt = (i) => padL + (n === 1 ? plotW / 2 : i * xStep);
+  const closes = data.map((c) => c[4]);
+  const highs = data.map((c) => c[2]);
+  const lows = data.map((c) => c[3]);
+  const vols = data.map((c) => c[5]);
+  const maxP = Math.max(...highs);
+  const minP = Math.min(...lows);
+  const pad = Math.max((maxP - minP) * 0.12, maxP * 0.0015);
 
-  // Y scale
-  let lo = Infinity;
-  let hi = -Infinity;
-  if (metric === 'volume') {
-    lo = 0;
-    for (const c of data) hi = Math.max(hi, c.v);
-    hi = Math.max(hi * 1.12, 1000);
-  } else {
-    for (const c of data) {
-      lo = Math.min(lo, c.l);
-      hi = Math.max(hi, c.h);
-    }
-    if (ref) {
-      lo = Math.min(lo, ref);
-      hi = Math.max(hi, ref);
-    }
-    const span = Math.max(hi - lo, (hi || 10) * 0.006);
-    lo -= span * 0.10;
-    hi += span * 0.10;
+  // Benchmark normalized on the visible window's first close
+  let bmkSeries = [];
+  if (showBenchmark && benchmark?.length) {
+    const t0 = data[0][0];
+    const b0 = benchmark.find((b) => b[0] >= t0)?.[1] ?? benchmark[0]?.[1] ?? 100;
+    const price0 = closes[0];
+    bmkSeries = benchmark
+      .filter((b) => b[0] >= t0)
+      .map(([t, v]) => [t, price0 * (v / b0)]);
   }
 
-  const valToY = (v) => padT + plotH - ((v - lo) / Math.max(1e-9, hi - lo)) * plotH;
+  let hi = maxP + pad;
+  let lo = minP - pad;
+  for (const [, v] of bmkSeries) { hi = Math.max(hi, v + pad * 0.4); lo = Math.min(lo, v - pad * 0.4); }
+  for (const v of [avgLong, avgShort]) {
+    if (Number.isFinite(v) && v > 0) { hi = Math.max(hi, v + pad * 0.2); lo = Math.min(lo, v - pad * 0.2); }
+  }
 
-  // Horizontal grid lines + right Y-axis labels
-  ctx.font = '9.5px ui-monospace, monospace';
-  ctx.textAlign = 'left';
+  const isVol = metric === 'volume';
+  const maxVol = Math.max(1, ...vols);
+  const yPrice = (v) => padT + (1 - (v - lo) / (hi - lo || 1)) * plotH;
+  const xAt = (i) => padL + (i / Math.max(1, data.length - 1)) * plotW;
+
+  // Background
+  ctx.fillStyle = C.bg;
+  ctx.fillRect(0, 0, w, h);
+
+  // Grid + price axis
+  ctx.font = '9px ui-monospace, monospace';
+  ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
-  const rows = 5;
-  for (let r = 0; r <= rows; r++) {
-    const val = lo + ((hi - lo) * r) / rows;
-    const y = Math.round(valToY(val)) + 0.5;
+  for (let i = 0; i <= 4; i++) {
+    const y = padT + (plotH * i) / 4;
     ctx.strokeStyle = C.grid;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(padL, y);
-    ctx.lineTo(padL + plotW, y);
+    ctx.moveTo(padL, Math.round(y) + 0.5);
+    ctx.lineTo(padL + plotW, Math.round(y) + 0.5);
     ctx.stroke();
-
-    ctx.fillStyle = C.axis;
-    if (metric === 'volume') {
-      ctx.fillText(`${Math.round(val / 1000)}k`, padL + plotW + 4, y);
-    } else {
-      const dec = hi - lo > 12 ? 0 : val >= 100 ? 1 : 2;
-      ctx.fillText(usNum(val, dec), padL + plotW + 4, y);
-    }
+    const val = hi - ((hi - lo) * i) / 4;
+    ctx.fillStyle = C.dim;
+    ctx.fillText(isVol ? `${Math.round((maxVol * (1 - i / 4)) / 1000)}k` : fmt(val, dp), w - 5, y);
   }
 
-  // Vertical right-edge axis title ("price" or "volume", matching AmplifyME Highcharts)
-  ctx.save();
-  ctx.translate(w - 6, padT + plotH / 2);
-  ctx.rotate(-Math.PI / 2);
-  ctx.fillStyle = '#698a9e';
-  ctx.font = '9.5px sans-serif';
+  // Time axis labels
+  const scale = (4 * 3600) / Math.max(1, roundSeconds);
   ctx.textAlign = 'center';
-  ctx.fillText(metric === 'volume' ? 'volume' : 'price', 0, 0);
-  ctx.restore();
-
-  // X-axis timestamps (12:45 .. 13:25)
-  ctx.textAlign = 'center';
-  ctx.font = '9px ui-monospace, monospace';
-  const cols = Math.min(7, Math.max(3, Math.floor(plotW / 66)));
-  for (let cIdx = 0; cIdx <= cols; cIdx++) {
-    const i = Math.min(n - 1, Math.round((cIdx * (n - 1)) / cols));
-    const x = Math.round(xAt(i)) + 0.5;
-    const simSec = data[i].t ?? data[i][0] ?? 0;
-    const totalSec = Math.max(0, 13 * 3600 + Math.round(simSec * 9));
-    const hh = String(Math.floor(totalSec / 3600) % 24).padStart(2, '0');
-    const mm = String(Math.floor((totalSec % 3600) / 60)).padStart(2, '0');
-    ctx.fillStyle = C.axis;
-    ctx.fillText(`${hh}:${mm}`, x, padT + plotH + 9);
+  for (let i = 0; i < 5; i++) {
+    const idx = Math.round((data.length - 1) * (i / 4));
+    const t = data[idx][0] + roundSeconds;
+    const total = 13 * 3600 + t * scale;
+    const hh = Math.floor(total / 3600) % 24;
+    const mm = Math.floor((total % 3600) / 60);
+    ctx.fillStyle = C.dim;
+    ctx.fillText(`${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`, xAt(idx), h - 5);
   }
 
-  if (metric === 'volume') {
-    const bw = Math.max(2, xStep * 0.65);
-    data.forEach((c, i) => {
-      const y = valToY(c.v);
-      const bh = padT + plotH - y;
-      ctx.fillStyle = c.c >= c.o ? 'rgba(46, 204, 113, 0.65)' : 'rgba(231, 76, 60, 0.65)';
-      ctx.fillRect(xAt(i) - bw / 2, y, bw, Math.max(1, bh));
-    });
-  } else {
-    // Reference open price dashed red horizontal line (exact match to image-1.png!)
-    if (ref) {
-      const yRef = Math.round(valToY(ref)) + 0.5;
-      ctx.save();
-      ctx.setLineDash([4, 3]);
-      ctx.strokeStyle = 'rgba(231, 76, 60, 0.8)';
-      ctx.lineWidth = 1.1;
-      ctx.beginPath();
-      ctx.moveTo(padL, yRef);
-      ctx.lineTo(padL + plotW, yRef);
-      ctx.stroke();
-      ctx.restore();
-    }
+  // Volume histogram (always subtle; full height in VOLUME mode)
+  for (let i = 0; i < data.length; i++) {
+    const bh = (vols[i] / maxVol) * (isVol ? plotH * 0.86 : plotH * 0.16);
+    const y = padT + plotH - bh;
+    ctx.fillStyle = isVol
+      ? (data[i][4] >= data[i][1] ? 'rgba(46,204,113,0.55)' : 'rgba(235,87,87,0.5)')
+      : (data[i][4] >= data[i][1] ? 'rgba(46,204,113,0.16)' : 'rgba(235,87,87,0.14)');
+    const bw = Math.max(1, plotW / data.length - 1);
+    ctx.fillRect(xAt(i) - bw / 2, y, bw, bh);
+  }
 
+  if (!isVol) {
     if (mode === 'candles') {
-      const bw = Math.max(2, Math.min(9, xStep * 0.64));
-      data.forEach((c, i) => {
-        const up = c.c >= c.o;
-        const col = up ? C.up : C.down;
-        ctx.strokeStyle = col;
-        ctx.fillStyle = col;
+      const bw = Math.max(1, plotW / data.length - 1);
+      for (let i = 0; i < data.length; i++) {
+        const [, o, hh, ll, c] = data[i];
+        const up = c >= o;
+        const color = up ? C.up : C.down;
         const x = xAt(i);
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+        ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(x, valToY(c.h));
-        ctx.lineTo(x, valToY(c.l));
+        ctx.moveTo(x + 0.5, yPrice(Math.max(hh, ll)));
+        ctx.lineTo(x + 0.5, yPrice(Math.min(hh, ll)));
         ctx.stroke();
-        const yo = valToY(c.o);
-        const yc = valToY(c.c);
+        const yo = yPrice(o);
+        const yc = yPrice(c);
         const top = Math.min(yo, yc);
-        const bh = Math.max(1.2, Math.abs(yc - yo));
-        ctx.fillRect(x - bw / 2, top, bw, bh);
-      });
+        const bh = Math.max(1, Math.abs(yc - yo));
+        if (bw >= 2) {
+          if (up) ctx.fillRect(x - bw / 2, top, bw, bh);
+          else {
+            ctx.fillRect(x - bw / 2, top, bw, bh);
+            ctx.strokeRect(x - bw / 2 + 0.5, top + 0.5, Math.max(1, bw - 1), Math.max(1, bh - 1));
+          }
+        } else {
+          ctx.fillRect(x, top, 1, bh || 1);
+        }
+      }
     } else {
-      // Crisp AmplifyME gold price line
+      // Gold price line with soft area
+      const grad = ctx.createLinearGradient(0, padT, 0, padT + plotH);
+      grad.addColorStop(0, 'rgba(242, 201, 76, 0.20)');
+      grad.addColorStop(1, 'rgba(242, 201, 76, 0.01)');
       ctx.beginPath();
-      data.forEach((c, i) => {
-        const x = xAt(i);
-        const y = valToY(c.c);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
+      ctx.moveTo(xAt(0), yPrice(closes[0]));
+      for (let i = 1; i < data.length; i++) ctx.lineTo(xAt(i), yPrice(closes[i]));
+      ctx.lineTo(xAt(data.length - 1), padT + plotH);
+      ctx.lineTo(xAt(0), padT + plotH);
+      ctx.closePath();
+      ctx.fillStyle = grad;
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(xAt(0), yPrice(closes[0]));
+      for (let i = 1; i < data.length; i++) ctx.lineTo(xAt(i), yPrice(closes[i]));
       ctx.strokeStyle = C.line;
-      ctx.lineWidth = 1.65;
+      ctx.lineWidth = 1.6;
       ctx.lineJoin = 'round';
       ctx.stroke();
     }
 
-    // Optional SMA(16) overlay
-    if (showSma && data.length >= 4) {
-      const win = Math.min(16, data.length);
+    // SMA(20) computed on the full candle series
+    if (showSma && candles.length > 5) {
+      const period = 20;
+      const start = candles.length - data.length;
       ctx.beginPath();
       let started = false;
       for (let i = 0; i < data.length; i++) {
-        const start = Math.max(0, i - win + 1);
+        const absIdx = start + i;
+        if (absIdx < period - 1) continue;
         let sum = 0;
-        for (let k = start; k <= i; k++) sum += data[k].c;
-        const avg = sum / (i - start + 1);
+        for (let k = absIdx - period + 1; k <= absIdx; k++) sum += candles[k][4];
+        const v = sum / period;
         const x = xAt(i);
-        const y = valToY(avg);
+        const y = yPrice(v);
         if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
       }
-      ctx.strokeStyle = C.sma;
-      ctx.lineWidth = 1.3;
-      ctx.stroke();
-    }
-
-    // Trade execution markers
-    if (showMarkers && markers?.length) {
-      const t0 = data[0].t;
-      const tSpan = Math.max(1, (data[n - 1].t ?? n) - t0);
-      for (const m of markers) {
-        if (m.t < t0 || m.t > data[n - 1].t + 2) continue;
-        const frac = (m.t - t0) / tSpan;
-        const x = padL + frac * plotW;
-        const y = valToY(m.price);
-        ctx.beginPath();
-        if (m.side === 'BUY') {
-          ctx.moveTo(x, y - 6);
-          ctx.lineTo(x - 3.5, y + 1);
-          ctx.lineTo(x + 3.5, y + 1);
-        } else {
-          ctx.moveTo(x, y + 6);
-          ctx.lineTo(x - 3.5, y - 1);
-          ctx.lineTo(x + 3.5, y - 1);
-        }
-        ctx.closePath();
-        ctx.fillStyle = m.side === 'BUY' ? C.up : C.down;
-        ctx.fill();
+      if (started) {
+        ctx.strokeStyle = C.sma;
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
       }
     }
-  }
 
-  // Hover crosshair
-  if (hoverX != null && hoverX >= padL && hoverX <= padL + plotW) {
-    const i = Math.max(0, Math.min(n - 1, Math.round((hoverX - padL) / xStep)));
-    const c = data[i];
-    const x = xAt(i);
-    const y = valToY(metric === 'volume' ? c.v : c.c);
-    ctx.save();
-    ctx.strokeStyle = 'rgba(210, 235, 250, 0.35)';
-    ctx.setLineDash([3, 3]);
-    ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, padT + plotH); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y); ctx.stroke();
-    ctx.restore();
-  }
-
-  // Bottom Navigator Minimap (matches Highcharts navigator at bottom of image-1.png!)
-  if (navH > 0 && fullSeries?.length > 1) {
-    const navTop = h - navH - 2;
-    const navW = plotW;
-    ctx.fillStyle = C.navBg;
-    ctx.fillRect(padL, navTop, navW, navH);
-    ctx.strokeStyle = 'rgba(110, 155, 180, 0.35)';
-    ctx.strokeRect(padL + 0.5, navTop + 0.5, navW - 1, navH - 1);
-
-    let nLo = Infinity;
-    let nHi = -Infinity;
-    for (const c of fullSeries) {
-      const val = c.c ?? c[4];
-      nLo = Math.min(nLo, val);
-      nHi = Math.max(nHi, val);
+    // BENCHMARK overlay
+    if (bmkSeries.length > 1) {
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < data.length; i++) {
+        const b = bmkSeries.find(([t]) => t === data[i][0]) || bmkSeries[Math.min(i, bmkSeries.length - 1)];
+        if (!b) continue;
+        const x = xAt(i);
+        const y = yPrice(b[1]);
+        if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = C.bmk;
+      ctx.lineWidth = 1.3;
+      ctx.setLineDash([4, 3]);
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
-    const nSpan = Math.max(1e-6, nHi - nLo);
-    ctx.beginPath();
-    fullSeries.forEach((c, idx) => {
-      const val = c.c ?? c[4];
-      const nx = padL + (idx / Math.max(1, fullSeries.length - 1)) * navW;
-      const ny = navTop + navH - 3 - ((val - nLo) / nSpan) * (navH - 6);
-      if (idx === 0) ctx.moveTo(nx, ny);
-      else ctx.lineTo(nx, ny);
-    });
-    ctx.strokeStyle = 'rgba(160, 205, 230, 0.65)';
+
+    // Maximum / Minimum dotted lines
+    const maxClose = Math.max(...highs);
+    const minClose = Math.min(...lows);
+    ctx.setLineDash([3, 3]);
     ctx.lineWidth = 1;
+    ctx.strokeStyle = C.max;
+    ctx.beginPath();
+    ctx.moveTo(padL, yPrice(maxClose));
+    ctx.lineTo(padL + plotW, yPrice(maxClose));
     ctx.stroke();
+    ctx.strokeStyle = C.min;
+    ctx.beginPath();
+    ctx.moveTo(padL, yPrice(minClose));
+    ctx.lineTo(padL + plotW, yPrice(minClose));
+    ctx.stroke();
+    ctx.setLineDash([]);
 
-    // Shaded active zoom window on the right
-    const winFrac = Math.max(0.12, Math.min(1, zoomRatio));
-    const winW = navW * winFrac;
-    const winX = padL + navW - winW;
-    ctx.fillStyle = C.navWindow;
-    ctx.fillRect(winX, navTop + 1, winW, navH - 2);
-    ctx.strokeStyle = C.navBorder;
-    ctx.strokeRect(winX + 0.5, navTop + 0.5, winW - 1, navH - 1);
+    ctx.font = '8.5px ui-monospace, monospace';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = C.max;
+    ctx.fillText(`MAX ${fmt(maxClose, dp)}`, padL + 3, yPrice(maxClose) - 6);
+    ctx.fillStyle = C.min;
+    ctx.fillText(`MIN ${fmt(minClose, dp)}`, padL + 3, yPrice(minClose) + 8);
 
-    // Left & right navigator handles
-    [winX, padL + navW - 3].forEach((hx) => {
-      ctx.fillStyle = '#c8dce8';
-      ctx.fillRect(hx, navTop + 5, 3, navH - 10);
+    // Average long / short position lines
+    const drawAvg = (value, color, label) => {
+      if (!Number.isFinite(value) || value <= 0) return;
+      const y = yPrice(value);
+      if (y < padT || y > padT + plotH) return;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(padL, y);
+      ctx.lineTo(padL + plotW, y);
+      ctx.stroke();
+      ctx.fillStyle = color;
+      ctx.textAlign = 'right';
+      ctx.font = '8.5px ui-monospace, monospace';
+      ctx.fillText(label, padL + plotW - 3, y - 5);
+    };
+    drawAvg(avgLong, C.avgLong, 'AVERAGE LONG');
+    drawAvg(avgShort, C.avgShort, 'AVERAGE SHORT');
+
+    // Trade markers
+    ctx.textAlign = 'center';
+    for (const m of markers || []) {
+      const idx = data.findIndex((c) => c[0] >= m.t);
+      if (idx < 0) continue;
+      const x = xAt(idx);
+      const y = yPrice(m.price);
+      const up = m.side === 'BUY';
+      ctx.fillStyle = up ? C.up : C.down;
+      ctx.beginPath();
+      ctx.moveTo(x, y + (up ? 4 : -4));
+      ctx.lineTo(x - 3, y + (up ? 9 : -9));
+      ctx.lineTo(x + 3, y + (up ? 9 : -9));
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  // Hover crosshair + OHLC tooltip
+  if (hoverX != null && hoverX >= padL && hoverX <= padL + plotW && data.length) {
+    const idx = Math.round(((hoverX - padL) / plotW) * (data.length - 1));
+    const c = data[Math.max(0, Math.min(data.length - 1, idx))];
+    const x = xAt(idx);
+    ctx.strokeStyle = 'rgba(207, 230, 242, 0.35)';
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath();
+    ctx.moveTo(x, padT);
+    ctx.lineTo(x, padT + plotH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const total = 13 * 3600 + (c[0] + roundSeconds) * scale;
+    const hh = String(Math.floor(total / 3600) % 24).padStart(2, '0');
+    const mm = String(Math.floor((total % 3600) / 60)).padStart(2, '0');
+    const lines = [
+      `${hh}:${mm}`,
+      `O ${fmt(c[1], dp)}  H ${fmt(c[2], dp)}`,
+      `L ${fmt(c[3], dp)}  C ${fmt(c[4], dp)}`,
+      `VOL ${Math.round(c[5]).toLocaleString('en-US')}`,
+    ];
+    const bw = 132;
+    const bh = 13 * lines.length + 8;
+    const bx = Math.min(w - bw - 4, Math.max(4, x + 8));
+    const by = padT + 6;
+    ctx.fillStyle = 'rgba(4, 21, 31, 0.93)';
+    ctx.strokeStyle = 'rgba(32, 168, 230, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.strokeRect(bx + 0.5, by + 0.5, bw, bh);
+    ctx.textAlign = 'left';
+    ctx.font = '9.5px ui-monospace, monospace';
+    lines.forEach((line, i) => {
+      ctx.fillStyle = i === 0 ? C.line : C.text;
+      ctx.fillText(line, bx + 7, by + 13 + i * 13);
     });
   }
 
-  return { data, padL, padR, plotW };
+  ctx.textAlign = 'left';
+  return { w, h };
 }
